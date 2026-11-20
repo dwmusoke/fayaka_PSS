@@ -1,0 +1,4 @@
+# Python backend dependencies
+reportlab>=4.0
+pillow>=10.0
+psycopg[binary]>=3.1

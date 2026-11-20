@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Fayaka Airline - PSS</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <svg class="svg-sprite" aria-hidden="true">
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></symbol>
+    <symbol id="i-booking" viewBox="0 0 24 24"><path d="M4 6h16v14H4z"/><path d="M8 3v6M16 3v6M4 11h16"/><path d="M8 15h3M8 18h6"/></symbol>
+    <symbol id="i-source" viewBox="0 0 24 24"><path d="M12 3v12"/><path d="M8 11l4 4 4-4"/><path d="M5 20h14"/></symbol>
+    <symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 20a6 6 0 0 1 12 0"/><path d="M16 5a3 3 0 0 1 0 6M18 20a6 6 0 0 0-3-5.2"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v5h4"/><path d="M9 12h6M9 16h6"/></symbol>
+    <symbol id="i-invoice" viewBox="0 0 24 24"><path d="M5 3h14v18l-3-2-4 2-4-2-3 2z"/><path d="M9 8h6M9 12h6M9 16h3"/></symbol>
+    <symbol id="i-finance" viewBox="0 0 24 24"><path d="M4 19h16"/><path d="M6 16l4-5 3 3 5-7"/><path d="M16 7h3v3"/></symbol>
+    <symbol id="i-task" viewBox="0 0 24 24"><path d="M4 5h16v15H4z"/><path d="M8 3v4M16 3v4M4 9h16"/><path d="m8 14 2 2 4-4"/></symbol>
+    <symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></symbol>
+    <symbol id="i-setting" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4v-.2a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 13.6H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 6.6 7 3.8l.1.1a1.7 1.7 0 0 0 1.9.3 1.7 1.7 0 0 0 1-1.6V2.4h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1 2.8 2.8-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4h-.2a1.7 1.7 0 0 0-1.6 1z"/></symbol>
+    <symbol id="i-dots" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10" cy="10" r="6"/><path d="m15 15 5 5"/></symbol>
+    <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+  </svg>
+
+  <div id="app">
+    <div id="login-view" class="login-wrap">
+      <div class="login-card">
+        <div class="login-brand">
+          <span class="brand-mark">FA</span>
+          <div><h1>Fayaka Airline</h1><p class="muted">Passenger Service System - Reservations, Ticketing, Check-in &amp; Ancillary</p></div>
+        </div>
+        <form id="login-form">
+          <label>Tenant</label>
+          <input name="tenant" value="fayaka" required />
+          <label>Username</label>
+          <input name="username" placeholder="username" required />
+          <label>Password</label>
+          <input name="password" type="password" required />
+          <button type="submit">Sign in to workspace</button>
+          <div id="login-error" class="error"></div>
+        </form>
+        <div class="login-foot">PNR · Ticket Stock · Check-in · Payments · Channels · Accounting</div>
+      </div>
+    </div>
+
+    <div id="main-view" class="hidden">
+      <aside class="sidebar" id="sidebar">
+        <div class="brand">
+          <span class="brand-mark">FA</span>
+          <div><b>Fayaka Airline</b><small>Passenger Service System</small></div>
+          <button id="menu-toggle" class="icon-btn sidebar-toggle" aria-label="Toggle navigation"><svg class="icon"><use href="#i-menu"></use></svg></button>
+        </div>
+        <div class="tenant-box" id="tenant-box"></div>
+        <nav id="nav">
+          <div class="nav-group">
+            <div class="nav-label">Airline PSS</div>
+            <a data-view="pss-overview"><svg class="icon"><use href="#i-chart"></use></svg><span>PSS Overview</span></a>
+            <a data-view="pss-flights"><svg class="icon"><use href="#i-booking"></use></svg><span>Flights &amp; Inventory</span></a>
+            <a data-view="pss-bookings"><svg class="icon"><use href="#i-users"></use></svg><span>PNR / Bookings</span></a>
+            <a data-view="pss-stock"><svg class="icon"><use href="#i-file"></use></svg><span>Ticket Stock</span></a>
+            <a data-view="pss-checkins"><svg class="icon"><use href="#i-task"></use></svg><span>Check-in</span></a>
+            <a data-view="pss-payments"><svg class="icon"><use href="#i-finance"></use></svg><span>Payment Tracking</span></a>
+            <a data-view="pss-airports"><svg class="icon"><use href="#i-setting"></use></svg><span>Airports</span></a>
+            <a data-view="pss-channels"><svg class="icon"><use href="#i-setting"></use></svg><span>Channels</span></a>
+            <a data-view="pss-agencies"><svg class="icon"><use href="#i-users"></use></svg><span>Agency Direct</span></a>
+            <a data-view="pss-direct"><svg class="icon"><use href="#i-file"></use></svg><span>Direct E-tickets</span></a>
+            <a data-view="pss-charters"><svg class="icon"><use href="#i-booking"></use></svg><span>Charter Business</span></a>
+            <a data-view="pss-charter-flights"><svg class="icon"><use href="#i-source"></use></svg><span>Charter Flights</span></a>
+            <a data-view="pss-trace"><svg class="icon"><use href="#i-task"></use></svg><span>Traceability</span></a>
+            <a data-view="pss-ancillaries"><svg class="icon"><use href="#i-file"></use></svg><span>Ancillary Catalog</span></a>
+            <a data-view="pss-ancillary-sales"><svg class="icon"><use href="#i-finance"></use></svg><span>Ancillary Sales</span></a>
+            <a data-view="pss-baggage"><svg class="icon"><use href="#i-booking"></use></svg><span>Baggage Rules</span></a>
+            <a data-view="pss-airport-docs"><svg class="icon"><use href="#i-file"></use></svg><span>Airport Requirements</span></a>
+            <a data-view="pss-weather"><svg class="icon"><use href="#i-chart"></use></svg><span>Weather</span></a>
+            <a data-view="pss-aftersales"><svg class="icon"><use href="#i-users"></use></svg><span>After Sales / Reputation</span></a>
+            <a data-view="pss-eticket-tracker"><svg class="icon"><use href="#i-task"></use></svg><span>E-ticketing Tracker</span></a>
+            <a data-view="pss-ticket-status"><svg class="icon"><use href="#i-task"></use></svg><span>Ticket Status</span></a>
+            <a data-view="pss-workspace"><svg class="icon"><use href="#i-users"></use></svg><span>Partner Workspace</span></a>
+            <a data-view="pss-partner-users"><svg class="icon"><use href="#i-setting"></use></svg><span>Partner Logins</span></a>
+            <a data-view="pss-branches"><svg class="icon"><use href="#i-setting"></use></svg><span>Offices &amp; Branches</span></a>
+          </div>
+          <div class="nav-group">
+            <div class="nav-label">Overview</div>
+            <a data-view="dashboard" class="active"><svg class="icon"><use href="#i-grid"></use></svg><span>Dashboard</span></a>
+          </div>
+          <div class="nav-group">
+            <div class="nav-label">Travel</div>
+            <a data-view="travelers"><svg class="icon"><use href="#i-users"></use></svg><span>Travelers</span></a>
+            <a data-view="orders"><svg class="icon"><use href="#i-booking"></use></svg><span>Travel Items</span></a>
+            <a data-view="unused-tickets"><svg class="icon"><use href="#i-file"></use></svg><span>Unused Tickets</span></a>
+          </div>
+          <div class="nav-group">
+            <div class="nav-label">Customer & Sales</div>
+            <a data-view="crm"><svg class="icon"><use href="#i-users"></use></svg><span>Customers</span></a>
+            <a data-view="estimates"><svg class="icon"><use href="#i-file"></use></svg><span>Estimates</span></a>
+            <a data-view="partners"><svg class="icon"><use href="#i-users"></use></svg><span>Partners</span></a>
+          </div>
+          <div class="nav-group">
+            <div class="nav-label">Finance</div>
+            <a data-view="invoicing"><svg class="icon"><use href="#i-invoice"></use></svg><span>Invoices</span></a>
+            <a data-view="credit-notes"><svg class="icon"><use href="#i-invoice"></use></svg><span>Credit Notes</span></a>
+            <a data-view="payments"><svg class="icon"><use href="#i-finance"></use></svg><span>Payments</span></a>
+            <a data-view="bills"><svg class="icon"><use href="#i-finance"></use></svg><span>Bills</span></a>
+            <a data-view="expenses"><svg class="icon"><use href="#i-finance"></use></svg><span>Expenses</span></a>
+            <a data-view="journals"><svg class="icon"><use href="#i-file"></use></svg><span>Manual Journals</span></a>
+          </div>
+          <div class="nav-group">
+            <div class="nav-label">Agency Setup</div>
+            <a data-view="agency-profile"><svg class="icon"><use href="#i-setting"></use></svg><span>Agency Profile</span></a>
+            <a data-view="setup-users"><svg class="icon"><use href="#i-users"></use></svg><span>Users</span></a>
+            <a data-view="setup-products"><svg class="icon"><use href="#i-booking"></use></svg><span>Products</span></a>
+            <a data-view="setup-currencies"><svg class="icon"><use href="#i-finance"></use></svg><span>Currencies</span></a>
+            <a data-view="setup-contacts"><svg class="icon"><use href="#i-users"></use></svg><span>Contacts</span></a>
+            <a data-view="setup-rules"><svg class="icon"><use href="#i-setting"></use></svg><span>Business Rules</span></a>
+            <a data-view="setup-preferences"><svg class="icon"><use href="#i-setting"></use></svg><span>Preferences</span></a>
+            <a data-view="setup-mail"><svg class="icon"><use href="#i-file"></use></svg><span>Mail Templates</span></a>
+            <a data-view="setup-integrations"><svg class="icon"><use href="#i-setting"></use></svg><span>Integrations</span></a>
+          </div>
+          <div class="nav-group">
+            <div class="nav-label">Airline Finance</div>
+            <a data-view="refunds"><svg class="icon"><use href="#i-finance"></use></svg><span>Refund Management</span></a>
+            <a data-view="coupons"><svg class="icon"><use href="#i-file"></use></svg><span>Coupon Reporting</span></a>
+            <a data-view="vouchers"><svg class="icon"><use href="#i-file"></use></svg><span>Vouchers</span></a>
+            <a data-view="bank-accounts"><svg class="icon"><use href="#i-finance"></use></svg><span>Cash &amp; Bank</span></a>
+            <a data-view="bank-transactions"><svg class="icon"><use href="#i-finance"></use></svg><span>Bank Transactions</span></a>
+            <a data-view="reconciliations"><svg class="icon"><use href="#i-chart"></use></svg><span>Reconciliations</span></a>
+          </div>
+          <div class="nav-group">
+            <div class="nav-label">Control Center</div>
+            <a data-view="finance"><svg class="icon"><use href="#i-setting"></use></svg><span>Chart of Accounts &amp; Finance</span></a>
+            <a data-view="documents"><svg class="icon"><use href="#i-file"></use></svg><span>Documents & Sharing</span></a>
+            <a data-view="sources"><svg class="icon"><use href="#i-source"></use></svg><span>Sources & Import</span></a>
+            <a data-view="backoffice"><svg class="icon"><use href="#i-task"></use></svg><span>Operations Queue</span><b class="nav-count" id="nav-task-count"></b></a>
+            <a data-view="analytics"><svg class="icon"><use href="#i-chart"></use></svg><span>MIS & Analytics</span></a>
+            <a data-view="notifications"><svg class="icon"><use href="#i-file"></use></svg><span>Notifications</span></a>
+            <a data-view="disruptions"><svg class="icon"><use href="#i-task"></use></svg><span>Disruptions</span></a>
+            <a data-view="intelligence"><svg class="icon"><use href="#i-chart"></use></svg><span>Intelligence</span></a>
+            <a data-view="admin"><svg class="icon"><use href="#i-setting"></use></svg><span>Admin & Subscription</span></a>
+          </div>
+        </nav>
+        <div class="sidebar-footer">
+          <div style="display:flex;gap:6px">
+            <button id="change-pw-btn" class="secondary">Change password</button>
+            <button id="logout-btn" class="secondary">Sign out</button>
+          </div>
+          <div class="version">Enterprise Suite · v1.2</div>
+        </div>
+      </aside>
+      <main class="content">
+        <header class="topbar">
+          <div class="topbar-left">
+            <button id="content-menu-toggle" class="icon-btn mobile-only" aria-label="Toggle navigation"><svg class="icon"><use href="#i-menu"></use></svg></button>
+            <div>
+              <div class="breadcrumb"><span id="crumb-section">Workspace</span><span>/</span><span id="view-title">Dashboard</span></div>
+              <div class="page-subtitle" id="view-subtitle">Live command center for your travel business</div>
+            </div>
+          </div>
+          <div class="topbar-actions">
+            <label class="search-box"><svg class="icon"><use href="#i-search"></use></svg><input id="global-search" placeholder="Search PNR, customer, invoice" /></label>
+            <div class="menu">
+              <button class="icon-btn" data-menu-toggle="global-menu" aria-label="Quick actions"><svg class="icon"><use href="#i-dots"></use></svg></button>
+              <div class="menu-pop" id="global-menu">
+                <button data-action="quick-booking">New booking</button>
+                <button data-action="quick-customer">New customer</button>
+                <button data-action="quick-invoice">New invoice</button>
+                <button data-action="quick-expense">New expense</button>
+                <button data-action="open-branding">Brand documents</button>
+              </div>
+            </div>
+            <div class="user-chip" id="user-box"></div>
+          </div>
+        </header>
+        <div id="global-alert" class="global-alert hidden"></div>
+        <section id="view-pss-overview" class="view hidden"></section>
+        <section id="view-pss-flights" class="view hidden"></section>
+        <section id="view-pss-bookings" class="view hidden"></section>
+        <section id="view-pss-stock" class="view hidden"></section>
+        <section id="view-pss-checkins" class="view hidden"></section>
+        <section id="view-pss-payments" class="view hidden"></section>
+        <section id="view-pss-airports" class="view hidden"></section>
+        <section id="view-pss-channels" class="view hidden"></section>
+        <section id="view-pss-agencies" class="view hidden"></section>
+        <section id="view-pss-direct" class="view hidden"></section>
+        <section id="view-pss-charters" class="view hidden"></section>
+        <section id="view-pss-charter-flights" class="view hidden"></section>
+        <section id="view-pss-trace" class="view hidden"></section>
+        <section id="view-pss-ancillaries" class="view hidden"></section>
+        <section id="view-pss-ancillary-sales" class="view hidden"></section>
+        <section id="view-pss-baggage" class="view hidden"></section>
+        <section id="view-pss-airport-docs" class="view hidden"></section>
+        <section id="view-pss-weather" class="view hidden"></section>
+        <section id="view-pss-aftersales" class="view hidden"></section>
+        <section id="view-pss-eticket-tracker" class="view hidden"></section>
+        <section id="view-pss-ticket-status" class="view hidden"></section>
+        <section id="view-pss-workspace" class="view hidden"></section>
+        <section id="view-pss-partner-users" class="view hidden"></section>
+        <section id="view-pss-branches" class="view hidden"></section>
+        <section id="view-dashboard" class="view"></section>
+        <section id="view-travelers" class="view hidden"></section>
+        <section id="view-orders" class="view hidden"></section>
+  <section id="view-unused-tickets" class="view hidden"></section>
+        <section id="view-crm" class="view hidden"></section>
+        <section id="view-estimates" class="view hidden"></section>
+  <section id="view-partners" class="view hidden"></section>
+        <section id="view-invoicing" class="view hidden"></section>
+        <section id="view-credit-notes" class="view hidden"></section>
+        <section id="view-payments" class="view hidden"></section>
+        <section id="view-bills" class="view hidden"></section>
+        <section id="view-expenses" class="view hidden"></section>
+        <section id="view-journals" class="view hidden"></section>
+        <section id="view-agency-profile" class="view hidden"></section>
+        <section id="view-setup-users" class="view hidden"></section>
+        <section id="view-setup-chart" class="view hidden"></section>
+        <section id="view-setup-products" class="view hidden"></section>
+        <section id="view-setup-currencies" class="view hidden"></section>
+        <section id="view-setup-contacts" class="view hidden"></section>
+        <section id="view-setup-rules" class="view hidden"></section>
+        <section id="view-setup-preferences" class="view hidden"></section>
+        <section id="view-setup-mail" class="view hidden"></section>
+        <section id="view-setup-integrations" class="view hidden"></section>
+        <section id="view-finance" class="view hidden"></section>
+        <section id="view-documents" class="view hidden"></section>
+        <section id="view-sources" class="view hidden"></section>
+        <section id="view-backoffice" class="view hidden"></section>
+        <section id="view-analytics" class="view hidden"></section>
+        <section id="view-admin" class="view hidden"></section>
+  <section id="view-notifications" class="view hidden"></section>
+  <section id="view-disruptions" class="view hidden"></section>
+  <section id="view-refunds" class="view hidden"></section>
+  <section id="view-coupons" class="view hidden"></section>
+  <section id="view-vouchers" class="view hidden"></section>
+  <section id="view-bank-accounts" class="view hidden"></section>
+  <section id="view-bank-transactions" class="view hidden"></section>
+  <section id="view-reconciliations" class="view hidden"></section>
+  <section id="view-intelligence" class="view hidden"></section>
+      </main>
+    </div>
+  </div>
+
+  <div id="modal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head"><h3 id="modal-title"></h3><button id="modal-close" class="secondary">Close</button></div>
+      <div id="modal-body"></div>
+    </div>
+  </div>
+
+  <script src="/config.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

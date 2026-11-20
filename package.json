@@ -1,0 +1,12 @@
+{
+  "name": "fayaka-pss",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Fayaka Airline Passenger Service System (Python stdlib + SQLite/PostgreSQL)",
+  "scripts": {
+    "start": "python server.py",
+    "dev": "python server.py",
+    "build": "node -e \"console.log('No build step required')\"",
+    "import:air": "python import_air.py ../"
+  }
+}

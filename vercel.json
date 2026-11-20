@@ -1,0 +1,19 @@
+{
+  "version": 2,
+  "builds": [
+    { "src": "static/**", "use": "@vercel/static" }
+  ],
+  "routes": [
+    { "src": "/config.js", "dest": "/static/config.js" },
+    { "src": "/app.js", "dest": "/static/app.js" },
+    { "src": "/portal.js", "dest": "/static/portal.js" },
+    { "src": "/agency.js", "dest": "/static/agency.js" },
+    { "src": "/share.js", "dest": "/static/share.js" },
+    { "src": "/styles.css", "dest": "/static/styles.css" },
+    { "src": "/portal(/.*)?", "dest": "/static/portal.html" },
+    { "src": "/agency/(.*)", "dest": "/static/agency.html" },
+    { "src": "/share/(.*)", "dest": "/static/share.html" },
+    { "src": "/", "dest": "/static/index.html" },
+    { "src": "/(.*)", "dest": "/static/$1" }
+  ]
+}
