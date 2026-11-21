@@ -12,6 +12,8 @@ DB_PATH = os.environ.get("TRAVEL_ERP_DB", os.path.join(os.path.dirname(__file__)
 _raw_db_url = (os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL") or "").strip()
 if _raw_db_url.startswith("postgres://"):
     _raw_db_url = "postgresql://" + _raw_db_url[len("postgres://"):]
+if _raw_db_url.count("postgresql://") > 1:
+    _raw_db_url = _raw_db_url[:_raw_db_url.find("postgresql://", len("postgresql://"))].rstrip("/")
 if _raw_db_url and "sslmode=" not in _raw_db_url and ("supabase.co" in _raw_db_url or "supabase.com" in _raw_db_url):
     _raw_db_url += ("&" if "?" in _raw_db_url else "?") + "sslmode=require"
 DATABASE_URL = _raw_db_url
