@@ -78,6 +78,62 @@
     .anc-item input { margin-top:3px; }
     .trace-item { border-left:3px solid #f59e0b; padding:6px 0 6px 12px; margin:6px 0; font-size:13px; }
     .trace-item small { color:#64748b; display:block; }
+    .avail-summary { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; padding:2px 2px 12px; }
+    .avail-summary b { display:block; font-size:15px; }
+    .avail-summary small { color:#64748b; }
+    .avail-badges { display:flex; gap:6px; flex-wrap:wrap; }
+    .avail-badge { display:inline-flex; align-items:center; padding:4px 9px; border-radius:999px; font-size:10px; font-weight:800; letter-spacing:.3px; text-transform:uppercase; background:#eef2f7; color:#475569; border:1px solid #e2e8f0; }
+    .avail-badge.good { background:#ecfdf5; border-color:#a7f3d0; color:#065f46; }
+    .avail-badge.warn { background:#fffbeb; border-color:#fde68a; color:#92400e; }
+    .avail-badge.info { background:#eff6ff; border-color:#bfdbfe; color:#1d4ed8; }
+    .avail-card { border:1px solid #dfe7f1; border-radius:14px; background:linear-gradient(180deg,#fff,#f9fbfd); margin-top:10px; overflow:hidden; box-shadow:0 4px 12px rgba(11,42,74,.05); transition:border-color .15s ease, box-shadow .15s ease, transform .15s ease; }
+    .avail-card:hover { transform:translateY(-1px); box-shadow:0 10px 24px rgba(11,42,74,.1); }
+    .avail-card.selected { border-color:#0e7490; box-shadow:0 0 0 2px rgba(14,116,144,.14), 0 10px 24px rgba(11,42,74,.1); }
+    .avail-card-top { display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; padding:12px 14px; border-bottom:1px solid #eef1f5; background:rgba(248,250,252,.8); }
+    .avail-airline { display:flex; align-items:center; gap:10px; }
+    .avail-airline b { font-size:15px; }
+    .avail-airline small { display:block; color:#64748b; margin-top:2px; }
+    .avail-logo { width:36px; height:36px; border-radius:10px; display:flex; align-items:center; justify-content:center; background:linear-gradient(145deg,#0b2a4a,#0e7490); color:#fff; font-weight:800; font-size:12px; }
+    .avail-card-main { display:grid; grid-template-columns:minmax(300px,1.5fr) minmax(220px,1.1fr) 190px; gap:16px; padding:14px; align-items:center; }
+    .avail-route { display:grid; grid-template-columns:1fr 1.3fr 1fr; align-items:center; gap:8px; }
+    .avail-point b { display:block; font-size:22px; letter-spacing:.2px; }
+    .avail-point span { display:block; font-size:14px; font-weight:800; }
+    .avail-point small { display:block; color:#64748b; font-size:10px; margin-top:2px; }
+    .avail-point.right { text-align:right; }
+    .avail-line { text-align:center; }
+    .avail-line small { display:block; color:#64748b; font-size:10px; }
+    .avail-line i { display:block; height:2px; margin:6px 0; background:linear-gradient(90deg,#0e7490,#f59e0b); position:relative; }
+    .avail-line i::before, .avail-line i::after { content:""; position:absolute; top:-3px; width:8px; height:8px; border-radius:50%; background:#0b2a4a; }
+    .avail-line i::before { left:0; } .avail-line i::after { right:0; background:#f59e0b; }
+    .avail-meta { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px 12px; }
+    .avail-meta small, .avail-price small { display:block; color:#64748b; font-size:10px; text-transform:uppercase; letter-spacing:.5px; }
+    .avail-meta b { font-size:12px; }
+    .avail-price { border-left:1px dashed #cfd8e3; padding-left:14px; display:flex; flex-direction:column; gap:6px; }
+    .avail-price b { font-size:22px; color:#0b2a4a; }
+    .avail-price .portal-btn { width:100%; padding:9px 12px; }
+    .avail-card-foot { display:flex; gap:6px; flex-wrap:wrap; padding:9px 14px; border-top:1px solid #eef1f5; background:rgba(248,250,252,.6); }
+    .detail-modal { width:min(980px,96vw); padding:0; }
+    .detail-modal .modal-head { padding:16px 18px; margin:0; }
+    .detail-modal .modal-head h3 { margin-top:3px; }
+    .detail-modal #flight-detail-body { padding:16px 18px 20px; }
+    .detail-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
+    .detail-section { border:1px solid #dfe7f1; border-radius:12px; padding:12px; background:#f9fbfd; }
+    .detail-section.wide { grid-column:1/-1; }
+    .detail-section h4 { margin:0 0 10px; font-size:12px; text-transform:uppercase; letter-spacing:.7px; color:#0e7490; }
+    .detail-kv { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:8px; }
+    .detail-kv small { display:block; color:#64748b; font-size:10px; text-transform:uppercase; }
+    .detail-kv b { font-size:13px; }
+    .detail-row { display:flex; justify-content:space-between; gap:10px; padding:6px 0; border-bottom:1px solid #eef1f5; font-size:12px; }
+    .detail-row:last-child { border-bottom:0; }
+    .detail-terms { margin:10px 0 0; padding-left:18px; color:#475569; font-size:12px; }
+    .seat-legend { display:flex; gap:6px; margin-bottom:8px; }
+    .seat-map { display:flex; flex-wrap:wrap; gap:6px 14px; max-height:260px; overflow:auto; padding:8px; background:#fff; border:1px solid #e2e8f0; border-radius:10px; }
+    .seat-row { display:flex; align-items:center; gap:3px; }
+    .seat-row-no { width:22px; text-align:right; color:#94a3b8; font-size:10px; margin-right:3px; }
+    .seat { width:28px; height:25px; border-radius:5px; display:flex; align-items:center; justify-content:center; font-size:8px; font-weight:700; border:1px solid #a7f3d0; background:#ecfdf5; color:#065f46; }
+    .seat.occupied { border-color:#fecaca; background:#fef2f2; color:#991b1b; text-decoration:line-through; }
+    .seat.aisle { margin-right:12px; }
+    .seat.selected { border-color:#0e7490; background:#e0f2fe; color:#075985; box-shadow:0 0 0 2px #0e7490; }
     .success { background:#ecfdf5; border:1px solid #a7f3d0; color:#065f46; padding:14px; border-radius:10px; margin-bottom:12px; }
     .error { background:#fef2f2; border:1px solid #fecaca; color:#991b1b; padding:12px; border-radius:10px; }
     .muted { color:#64748b; font-size:12px; }
@@ -86,6 +142,8 @@
     th,td { text-align:left; padding:9px 8px; border-bottom:1px solid #eef1f5; }
     th { font-size:10px; text-transform:uppercase; color:#64748b; }
     @media (max-width: 800px) { .hero-art { display:none; } .topbar-note { display:none; } .portal-hero h1 { font-size:24px; } .flight-row { grid-template-columns:1fr 1fr; } .flight-row.head { display:none; } }
+    @media (max-width: 950px) { .avail-card-main { grid-template-columns:1fr; } .avail-price { border-left:0; border-top:1px dashed #cfd8e3; padding:12px 0 0; flex-direction:row; flex-wrap:wrap; align-items:center; } .avail-price .portal-btn { width:auto; } .detail-grid { grid-template-columns:1fr; } }
+    @media (max-width: 600px) { .avail-route { grid-template-columns:1fr; } .avail-point.right { text-align:left; } .avail-line i { width:80%; margin-left:10%; } .seat { width:25px; } }
   </style>
 </head>
 <body>
@@ -213,6 +271,16 @@
         </div>
       </div>
       <div id="booking-detail" class="hidden"></div>
+    </div>
+
+    <div id="flight-detail-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="flight-detail-title">
+      <div class="modal-card detail-modal">
+        <div class="modal-head">
+          <div><div class="hero-eyebrow">Flight details</div><h3 id="flight-detail-title"></h3></div>
+          <button class="portal-btn secondary" onclick="closeFlightDetails()">Close</button>
+        </div>
+        <div id="flight-detail-body"></div>
+      </div>
     </div>
   </div>
   <script src="/config.js"></script>

@@ -6,6 +6,7 @@ function getCsrf(){ const m=document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/)
 let tripType = 'oneway';
 let searchData = null;
 let selected = [];
+let selectedSeats = {};
 let pax = {adults:1, children:0, infants:0};
 
 async function api(path, opts={}) {
@@ -59,6 +60,9 @@ async function init(){
   const d = await api('/api/portal/tenants');
   const opts = (d.tenants||[]).map(t=>`<option value="${esc(t.code)}" ${t.code===tenantFromPath?'selected':''}>${esc(t.name)} (${esc(t.code)})</option>`).join('');
   ['f-tenant','m-tenant','c-tenant'].forEach(id=>{ document.getElementById(id).innerHTML = opts; });
+  const modal = document.getElementById('flight-detail-modal');
+  if(modal) modal.addEventListener('click', e=>{ if(e.target === modal) closeFlightDetails(); });
+  document.addEventListener('keydown', e=>{ if(e.key === 'Escape') closeFlightDetails(); });
   await loadDisruptions();
 }
 
@@ -68,11 +72,59 @@ async function loadDisruptions(){
     const d = await api('/api/portal/disruptions?tenant='+encodeURIComponent(tenant()));
     const items = d.disruptions||[];
     if(!items.length){ box.classList.add('hidden'); return; }
-    box.innerHTML = `<div class="portal-card" style="border-left:5px solid #f59e0b"><b style="color:#b45309">Service disruptions</b>` +
-      items.map(x=>`<div class="trace-item"><b>${esc(x.disruption_type)} - ${esc(x.severity)}</b><small>${esc(x.affected_pnr||'')} ${esc(x.traveler_name||'')} ${esc(x.description||'')}</small></div>`).join('') + '</div>';
+    const severityColors = { high:'#dc2626', medium:'#f59e0b', low:'#10b981', info:'#3b82f6' };
+    const typeIcons = { cancel:'✗', delay:'⏱', gate:'🚪', aircraft:'✈', weather:'☁', staff:'👤', technical:'🔧', security:'🔒' };
+    box.innerHTML = `<div class="portal-card" style="border-left:5px solid #dc2626; background:#fffbff"><b style="color:#dc2626">Service disruptions</b>` +
+      items.map(x=>`<div class="trace-item" style="border-left:3px solid ${severityColors[x.severity]||'#6b7280'}"><span style="color:${severityColors[x.severity]||'#6b7280'}">${esc(typeIcons[x.disruption_type]||'•')} ${esc(x.disruption_type)}</span> ${esc(x.severity||'')} ${esc(x.description||'')}<br><small>${esc(x.affected_pnr||'')} ${esc(x.traveler_name||'')}</small></div>`).join('') + '</div>';
     box.classList.remove('hidden');
   }catch(e){ box.classList.add('hidden'); }
 }
+
+async function refreshUnusedTickets(){
+  const box = document.getElementById('unused-tickets-list');
+  box.textContent = 'Loading unused tickets...';
+  try{
+    const d = await api('/api/portal/unused-tickets?tenant='+encodeURIComponent(tenant()));
+    const items = d.unused_tickets||[];
+    if(!items.length){
+      box.innerHTML = '<div class="muted">No unused tickets found.</div>';
+      return;
+    }
+    const statusColors = { unused:'#6b7280', used:'#059669', voided:'#dc2626', refunded:'#f59e0b' };
+    box.innerHTML = `<div style="max-height:400px;overflow-y:auto;">
+      ${items.map(x=>`<div style="margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #e5e7eb"><div style="display:flex;justify-content:space-between align-items:center;margin-bottom:4px"><span style="color:${statusColors[x.ticket_status]||'#6b7280'}">${esc(x.ticket_no||'—')}</span><span style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px">${esc(x.ticket_status||'unused')}</span></div><div style="font-size:11px;color:#374151"><b>Traveler:</b> ${esc(x.traveler_name||'-')} <b>Airline:</b> ${esc(x.airline||'-')} <b>Issue:</b> ${esc(x.issue_date||'-')} <b>Travel date:</b> ${esc(x.travel_date||'-')} <b>Expiry:</b> ${esc(x.expiry_date||'—')}</div><div style="font-size:10px;color:#9ca3a9;margin-top:2px">Value: ${money(x.value, x.currency)} · ${x.refund_status||'pending'}</div></div>`).join('')}
+    </div>`;
+  }catch(e){ box.innerHTML = '<div class="muted error">Error loading unused tickets.</div>'; }
+}
+
+async function refreshTicketStatus(){
+  const box = document.getElementById('ticket-status-list');
+  box.textContent = 'Loading ticket statuses...';
+  try{
+    const d = await api('/api/portal/ticket-status?tenant='+encodeURIComponent(tenant()));
+    const items = d.ticket_status||[];
+    if(!items.length){
+      box.innerHTML = '<div class="muted">No ticket statuses found.</div>';
+      return;
+    }
+    const statuses = { issued:'✓ issued', voided:'✗ voided', refunded:' refunded', partially_refunded:' part-refunded', no_show:' no-show', unissued:' unissued', ticketed:' ticketed' };
+    box.innerHTML = `<div style="max-height:400px;overflow-y:auto;">
+      ${items.map(x=>`<div style="margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #e5e7eb"><div style="display:flex;justify-content:space-between align-items:center;margin-bottom:4px"><span style="color:#059669">${esc(typeIcons[x.ticket_status]||'•')} ${esc(x.ticket_no||'—')}</span><span style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px">${esc(statuses[x.ticket_status]||x.ticket_status)}</span></div><div style="font-size:11px;color:#374151"><b>Passenger:</b> ${esc(x.passenger_name||'-')} <b>PNR:</b> ${esc(x.pnr||'-')} <b>Flight:</b> ${esc(x.flight_no||'-')} <b>Status:</b> ${esc(x.ticket_status||'-')} <b>Issue:</b> ${esc(x.issue_date||'-')}</div></div>`).join('')}
+    </div>`;
+  }catch(e){ box.innerHTML = '<div class="muted error">Error loading ticket statuses.</div>'; }
+}
+
+const tag = (text, kind='') => text ? `<span class="avail-badge ${kind}">${esc(text)}</span>` : '';
+const airportLabel = (f, code) => {
+  const a = f.airports?.[code];
+  return a ? `${code} · ${a.city || a.name || ''}` : code;
+};
+
+const tag = (text, kind='') => text ? `<span class="avail-badge ${kind}">${esc(text)}</span>` : '';
+const airportLabel = (f, code) => {
+  const a = f.airports?.[code];
+  return a ? `${code} · ${a.city || a.name || ''}` : code;
+};
 
 async function searchFlights(){
   const msg = document.getElementById('search-msg');
@@ -97,57 +149,186 @@ async function searchFlights(){
     selected = (searchData.segments||[]).map(()=>null);
     const segs = searchData.segments||[];
     msg.textContent = `${segs.reduce((a,b)=>a+b.length,0)} flight(s) found`;
-    res.innerHTML = segs.map((list,i)=>`<div class="seg-title">Segment ${i+1}${segs.length===2?(i===0?' - Outbound':' - Return'):''} · ${list.length} flight(s)</div>` +
-      (list.length ? `<div class="flight-row head"><div>Flight</div><div>Route</div><div>Date / Time</div><div>Seats</div><div>Fare</div><div>Select</div></div>` +
-        list.map((f,j)=>`<div class="flight-row"><div><b>${esc(f.flight_no)}</b><small>${esc(f.aircraft||'')}</small></div>
-          <div><b>${esc(f.origin)} → ${esc(f.destination)}</b><small>${esc(f.gate||'')} ${esc(f.terminal||'')}</small></div>
-          <div>${esc(f.flight_date)}<small>${esc(f.dep_time||'')} / ${esc(f.arr_time||'')}</small></div>
-          <div>${esc(f.available_seats)}<small><span class="pill">${esc(f.status)}</span></small></div>
-          <div><b>${money(f.fare, f.currency)}</b></div>
-          <div><button class="portal-btn ${selected[i]===j?'dark':''}" onclick="selectFlight(${i},${j})">${selected[i]===j?'Selected':'Select'}</button></div></div>`).join('')
-        : '<div class="muted">No flights for this segment.</div>')).join('');
-    res.classList.remove('hidden');
+    renderResults();
   }catch(e){ msg.textContent = e.message; }
+}
+
+function renderResults(){
+  if(!searchData) return;
+  const res = document.getElementById('results');
+  const segs = searchData.segments||[];
+  const caps = searchData.capabilities||{};
+  const airline = searchData.airline?.name || 'Fayaka Airline';
+  res.innerHTML = `<div class="avail-summary">
+      <div><b>${esc(airline)}</b><small>${esc(searchData.cabin||'Y')} cabin · ${esc(searchData.trip_type||'oneway')} · ${esc(searchData.passengers?.total||1)} passenger(s)</small></div>
+      <div class="avail-badges">
+        ${tag('Online booking', 'good')}${tag(caps.ndc ? 'NDC offers' : '', 'info')}${tag(caps.seat_map ? 'Seat maps' : '', 'info')}${tag('Live availability', 'good')}
+          ${tag(f.fare_family?.fare_basis||'', 'info')} ${tag(f.fare_family?.code||'', 'muted')} ${tag(f.is_best_fare ? 'Best fare' : '', 'good')}
+      </div>
+    </div>` + segs.map((list,i)=>`<div class="seg-title">Segment ${i+1}${segs.length===2?(i===0?' - Outbound':' - Return'):''} · ${list.length} flight(s)</div>` +
+      (list.length ? list.map((f,j)=>`<div class="avail-card ${selected[i]===j?'selected':''}">
+        <div class="avail-card-top">
+          <div class="avail-airline">
+            <div class="avail-logo">${esc((searchData.airline?.code||'FA').slice(0,2).toUpperCase())}</div>
+            <div><b>${esc(f.flight_no)}</b><small>${esc(f.fare_family?.name||'Economy Saver')} · ${esc(f.fare_family?.code||'Y')}</small></div>
+          </div>
+          <div class="avail-badges">
+            ${tag(f.refundable ? 'Refundable' : 'Non-refundable', f.refundable ? 'good' : 'warn')}
+            ${tag(f.ndc?.enabled ? 'NDC offer' : '', 'info')}
+            ${tag(f.fare_family?.priority_boarding ? 'Priority' : '', 'info')}
+            ${tag(Number(f.available_seats) <= 9 ? `Only ${f.available_seats} left` : '', 'warn')}
+          </div>
+        </div>
+        <div class="avail-card-main">
+          <div class="avail-route">
+            <div class="avail-point"><b>${esc(f.dep_time||'')}</b><span>${esc(f.origin)}</span><small>${esc(airportLabel(f,f.origin))}</small></div>
+            <div class="avail-line"><small>${esc(f.duration||'')}</small><i></i><small>${esc(f.stops||'Nonstop')}</small></div>
+            <div class="avail-point right"><b>${esc(f.arr_time||'')}</b><span>${esc(f.destination)}</span><small>${esc(airportLabel(f,f.destination))}</small></div>
+          </div>
+          <div class="avail-meta">
+            <div><small>Equipment</small><b>${esc(f.equipment?.aircraft||f.aircraft||'-')}</b></div>
+            <div><small>Cabin layout</small><b>${esc(f.equipment?.layout||'-')}</b></div>
+            <div><small>Baggage</small><b>${esc(f.fare_family?.checked_baggage||'-')}</b></div>
+            <div><small>Terminal / gate</small><b>${esc([f.terminal,f.gate].filter(Boolean).join(' / ')||'-')}</b></div>
+          </div>
+          <div class="avail-price">
+            <small>Base fare</small><b>${money(f.fare, f.currency)}</b>
+            <small>Taxes &amp; fees <span class="muted" style="font-weight:600">+${money(Math.round((f.fare||0)*0.10)*100/100, f.currency)}</span></small>
+            <b style="color:#0e7490">Total per adult ${money(Math.round((f.fare||0)*1.10)*100/100, f.currency)}</b><small>· ${esc(f.flight_date||'')}</small>
+            <button class="portal-btn ${selected[i]===j?'dark':''}" onclick="selectFlight(${i},${j})">${selected[i]===j?'Selected':'Select'}</button>
+            <button class="portal-btn secondary" onclick="showFlightDetails(${i},${j})">Flight details</button>
+          </div>
+        </div>
+        <div class="avail-card-foot">
+          ${tag(f.status||'scheduled')}${tag(`${f.seats_available||f.available_seats||0} seats left`)}${tag(f.fare_family?.change_policy||'')}${tag('Terms apply')}
+        </div>
+      </div>`).join('') : '<div class="muted">No flights for this segment.</div>')).join('');
+  res.classList.remove('hidden');
 }
 
 function selectFlight(seg, idx){
   selected[seg] = idx;
-  const res = document.getElementById('results');
-  const blocks = res.querySelectorAll('.seg-title');
-  const start = blocks[seg] ? Array.from(res.children).indexOf(blocks[seg]) : -1;
-  const end = seg+1 < blocks.length ? Array.from(res.children).indexOf(blocks[seg+1]) : res.children.length;
-  for(let i=start+1;i<end;i++){
-    const btn = res.children[i].querySelector?.('button'); if(!btn) continue;
-    const isSel = Array.from(res.children[i].querySelectorAll('button')).indexOf(btn) === idx;
-    btn.className = 'portal-btn ' + (isSel?'dark':''); btn.textContent = isSel?'Selected':'Select';
-  }
+  renderResults();
   renderPassengerForm();
+}
+
+function showFlightDetails(seg, idx){
+  const f = searchData?.segments?.[seg]?.[idx];
+  if(!f) return;
+  const title = document.getElementById('flight-detail-title');
+  const body = document.getElementById('flight-detail-body');
+  const modal = document.getElementById('flight-detail-modal');
+  if(!title || !body || !modal) return;
+  title.textContent = `${f.flight_no} · ${f.origin} → ${f.destination} · ${f.flight_date}`;
+  const terms = (f.terms||[]).map(t=>`<li>${esc(t)}</li>`).join('');
+  const anc = (f.ancillaries||[]).map(a=>`<div class="detail-row"><span>${esc(a.name)} <small class="muted">${esc(a.category||'')}</small></span><b>${money(a.price,a.currency)}</b></div>`).join('') || '<div class="muted">No optional services configured.</div>';
+  const rows = f.equipment?.seat_rows||[];
+  const aisleAfter = f.equipment?.layout === '2-3-2' ? [1,4] : [2];
+  const picked = selectedSeats[String(f.id)] || '';
+  const seatMap = rows.map(r=>`<div class="seat-row"><span class="seat-row-no">${esc(r.row)}</span>${r.seats.map((s,k)=>`<span class="seat ${esc(s.status)} ${aisleAfter.includes(k)?'aisle':''} ${picked===esc(s.label)?'selected':''}" title="${esc(s.label)}" onclick="${esc(s.status)==='available'?'selectSeat('+f.id+',\''+esc(s.label)+'\')':''}">${esc(s.label)}</span>`).join('')}</div>`).join('');
+  const airportBlock = key => {
+    const a = f.airports?.[key] || {};
+    const w = f.weather?.[key] || {};
+    const docs = f.documents?.[key] || [];
+    return `<div class="detail-section"><h4>${esc(key==='origin'?'Departure':'Arrival')} · ${esc(f[key])}</h4>
+      <div class="detail-row"><span>Airport</span><b>${esc(a.name||'Not published')}</b></div>
+      <div class="detail-row"><span>City / country</span><b>${esc([a.city,a.country].filter(Boolean).join(', ')||'-')}</b></div>
+      <div class="detail-row"><span>Terminal / gate</span><b>${esc([a.terminal||f.terminal,f.gate].filter(Boolean).join(' / ')||'-')}</b></div>
+      <div class="detail-row"><span>Weather</span><b>${esc([w.condition,(w.temperature_c!==null && w.temperature_c!==undefined)?`${w.temperature_c}°C`:'',w.wind_kph?`${w.wind_kph} kph`:''].filter(Boolean).join(' · ')||'Not available')}</b></div>
+      ${docs.length?`<div class="muted" style="margin-top:6px">Travel documents: ${docs.map(d=>esc(d.title||d.doc_type)).join(' · ')}</div>`:''}</div>`;
+  };
+  body.innerHTML = `<div class="detail-grid">
+    <div class="detail-section wide"><h4>Fare conditions &amp; policies</h4>
+      <div class="detail-kv">
+        <div><small>Fare brand</small><b>${esc(f.fare_family?.name||'Economy Saver')}</b></div>
+        <div><small>Refundable</small><b>${f.refundable?'Yes':'No'}</b></div>
+        <div><small>Changes</small><b>${esc(f.fare_family?.change_policy||'-')}</b></div>
+        <div><small>Carry-on</small><b>${esc(f.fare_family?.carry_on||'-')}</b></div>
+        <div><small>Checked baggage</small><b>${esc(f.fare_family?.checked_baggage||'-')}</b></div>
+        <div><small>Seat selection</small><b>${esc(f.fare_family?.seat_selection||'-')}</b></div>
+        ${f.fare_family?.fare_basis ? `<div><small>Fare basis</small><b>${esc(f.fare_family.fare_basis)}</b></div>` : ''}
+        ${f.is_best_fare ? `<div style="margin-top:4px"><small>Best fare</small><b style="color:#059669">✓ Best available price</b></div>` : ''}
+      </div><ul class="detail-terms">${terms}</ul></div>
+    <div class="detail-section"><h4>Equipment</h4>
+      <div class="detail-row"><span>Aircraft</span><b>${esc(f.equipment?.aircraft||f.aircraft||'-')}</b></div>
+      <div class="detail-row"><span>Layout</span><b>${esc(f.equipment?.layout||'-')}</b></div>
+      <div class="detail-row"><span>Seat pitch</span><b>${esc(f.equipment?.seat_pitch||'-')}</b></div>
+      <div class="detail-row"><span>Wi-Fi</span><b>${esc(f.equipment?.wifi||'-')}</b></div>
+      <div class="detail-row"><span>Duration</span><b>${esc(f.duration||'-')}</b></div></div>
+    <div class="detail-section"><h4>NDC &amp; ancillaries</h4>
+      <div class="detail-row"><span>NDC offer</span><b>${f.ndc?.enabled?esc(f.ndc.offer||'Enabled'):'Not enabled'}</b></div>
+      <div class="detail-row"><span>Seat map</span><b>${f.equipment?.seat_rows?.length?'Available':'Not published'}</b></div>
+      <div style="margin-top:8px">${anc}</div></div>
+    ${airportBlock('origin')}${airportBlock('destination')}
+    <div class="detail-section wide"><h4>Seat map</h4>
+      <div class="seat-legend">${tag('Available','good')}${tag('Occupied','warn')}${picked?`<span style="margin-left:auto"><b style="color:#0e7490">Your seat:</b> <b>${esc(picked)}</b></span>`:''}</div>
+      <div class="seat-map">${seatMap||'<div class="muted">Seat map not published for this flight.</div>'}</div></div>
+  </div>`;
+  modal.classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeFlightDetails(){
+  const modal = document.getElementById('flight-detail-modal');
+  if(modal) modal.classList.add('hidden');
+  document.body.style.overflow = '';
+}
+function selectSeat(flightId, label){
+  selectedSeats[String(flightId)] = label;
+  const modal = document.getElementById('flight-detail-modal');
+  if(!modal.classList.contains('hidden')) showFlightDetailsFromCache(flightId);
+  toast('Seat '+esc(label)+' selected','ok');
+}
+function showFlightDetailsFromCache(flightId){
+  for(let si=0; si<(searchData?.segments||[]).length; si++){
+    const list = searchData.segments[si];
+    for(let fi=0; fi<list.length; fi++){
+      if(String(list[fi].id)===String(flightId)){ showFlightDetails(si, fi); return; }
+    }
+  }
 }
 
 function renderPassengerForm(){
   if(selected.some(x=>x===null)) { document.getElementById('booking-form').classList.add('hidden'); return; }
   const totalPax = pax.adults + pax.children + pax.infants;
   const types = [...Array(pax.adults).fill('ADT'), ...Array(pax.children).fill('CHD'), ...Array(pax.infants).fill('INF')];
-  const anc = searchData.ancillaries || [];
+  const anc = (searchData.ancillaries || []).filter(x => x.status === 'active');
+  const segFares = selected.map((idx,i)=>{
+    const f = searchData.segments[i][idx];
+    return {f, fare: Math.round((parseFloat(f.fare||0) + parseFloat(f.fare||0)*0.10)*100)/100};
+  });
+  const fareSubtotal = segFares.reduce((a,{fare})=>a + fare*totalPax, 0);
+  const ancTotal = anc.reduce((a,x)=>a + parseFloat(x.price||0), 0);
+  const grandTotal = fareSubtotal + ancTotal;
   const box = document.getElementById('booking-form');
   box.innerHTML = `<h3>Passenger details</h3><div class="muted" style="margin-bottom:10px">${totalPax} passenger(s) · ${selected.length} segment(s)</div>
     <div id="pax-rows">${types.map((t,i)=>`<div class="pax-row">
       <div class="portal-field"><label>Passenger ${i+1} full name</label><input class="pax-name" placeholder="As on travel document" /></div>
       <div class="portal-field"><label>Type</label><select class="pax-type"><option ${t==='ADT'?'selected':''}>ADT</option><option ${t==='CHD'?'selected':''}>CHD</option><option ${t==='INF'?'selected':''}>INF</option></select></div>
       <div class="portal-field"><label>Document no</label><input class="pax-doc" /></div></div>`).join('')}</div>
-    <div class="portal-grid"><div class="portal-field"><label>Contact email</label><input id="bk-email" type="email" /></div>
+<div class="portal-grid"><div class="portal-field"><label>Contact email</label><input id="bk-email" type="email" /></div>
       <div class="portal-field"><label>Contact phone</label><input id="bk-phone" /></div></div>
+    <div class="portal-card" style="margin-top:14px">
+      <h3 style="margin-top:0">Price summary</h3>
+      <div class="portal-grid" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr));margin-top:8px">
+        ${segFares.map(({f,fare})=>`<div class="portal-field" style="border:1px solid #eef1f5;border-radius:10px;padding:10px;background:#f9fbfd"><div style="font-size:10px;color:#64748b;text-transform:uppercase">${esc(f.flight_no)} · ${esc(f.origin)}→${esc(f.destination)}</div><div style="font-size:12px;color:#64748b">${esc(f.flight_date||'')}</div><div><b>${money(fare*totalPax, f.currency)}</b> <small style="color:#64748b">${totalPax} × ${money(fare, f.currency)}</small></div></div>`).join('')}
+        <div class="portal-field" style="border:1px solid #eef1f5;border-radius:10px;padding:10px;background:#f9fbfd"><div style="font-size:10px;color:#64748b;text-transform:uppercase">Fare subtotal</div><div><b>${money(fareSubtotal)}</b></div></div>
+        <div class="portal-field" style="border:1px solid #eef1f5;border-radius:10px;padding:10px;background:#f9fbfd"><div style="font-size:10px;color:#64748b;text-transform:uppercase">Taxes & fees (≈10%)</div><div><b>${money(Math.round(fareSubtotal*0.10)*100/100)}</b></div></div>
+        <div class="portal-field" style="border:1px solid #eef1f5;border-radius:10px;padding:10px;background:#f9fbfd"><div style="font-size:10px;color:#64748b;text-transform:uppercase">Ancillary services (optional)</div><div><b style="color:#0e7490">+${money(ancTotal)}</b> <small style="color:#64748b">select below</small></div></div>
+      </div>
+      <div style="display:flex;justify-content:space-between;margin-top:8px;padding-top:8px;border-top:1px dashed #cfd8e3">
+        <span><b>Estimated total</b></span><b style="color:#0b2a4a;font-size:15px">${money(grandTotal)}</b>
+      </div>
+    </div>
     <h3 style="margin-top:16px">Add ancillary services</h3><div id="anc-list" class="muted">Loading...</div>
     <div style="margin-top:14px"><button class="portal-btn" onclick="submitBooking()">Confirm booking</button>
       <button class="portal-btn secondary" onclick="document.getElementById('booking-form').classList.add('hidden')">Cancel</button></div>
     <div id="b-msg" class="error hidden" style="margin-top:10px"></div>`;
+  const list = document.getElementById('anc-list');
+  list.className = 'anc-grid';
+  list.innerHTML = `<div class="anc-item"><label><input type="checkbox" class="anc-check" value="ANC-MEAL" /><span><b>Meal preference</b><br><small class="muted">Hot meal with beverage service · ${money(200,'USD')}</small></span></label>${anc.map(x=>`<label class="anc-item">
+    <input type="checkbox" class="anc-check" value="${x.id}" /><span><b>${esc(x.name)}</b><br><small class="muted">${money(x.price,x.currency)} · ${esc(x.category)}</small></span></label>`).join('') || ''}` || '<div class="muted">No optional services configured.</div>';
   box.classList.remove('hidden');
-  api('/api/setup/pss-ancillaries').then(d=>{
-    const list = document.getElementById('anc-list'); if(!list) return;
-    list.className = 'anc-grid';
-    list.innerHTML = (d.ancillaries||[]).filter(x=>x.status==='active').map(x=>`<label class="anc-item">
-      <input type="checkbox" class="anc-check" value="${x.id}" /><span><b>${esc(x.name)}</b><br><small class="muted">${money(x.price,x.currency)} · ${esc(x.category)}</small></span></label>`).join('');
-  }).catch(()=>{ const l=document.getElementById('anc-list'); if(l) l.textContent='Ancillaries unavailable'; });
   box.scrollIntoView({behavior:'smooth'});
 }
 
@@ -159,18 +340,45 @@ async function submitBooking(){
     doc_no:r.querySelector('.pax-doc').value.trim()}));
   if(passengers.some(p=>!p.full_name)){ msg.textContent='Enter a name for every passenger'; msg.classList.remove('hidden'); return; }
   const ancillaries = Array.from(document.querySelectorAll('.anc-check:checked')).map(x=>({ancillary_id:Number(x.value), quantity:1}));
+  const seatSelections = Object.entries(selectedSeats).map(([fid,label])=>({flight_id:Number(fid), seat:label}));
   try{
     const r = await api('/api/portal/book',{method:'POST',body:JSON.stringify({
       tenant:tenant(), trip_type:tripType, cabin:document.getElementById('f-cabin').value,
-      flights:flightIds, passengers, contact:{email:document.getElementById('bk-email').value.trim(), phone:document.getElementById('bk-phone').value.trim()}, ancillaries})});
+      flights:flightIds, passengers, contact:{email:document.getElementById('bk-email').value.trim(), phone:document.getElementById('bk-phone').value.trim()}, ancillaries, seat_selections: seatSelections}));
     document.getElementById('booking-form').classList.add('hidden');
+    const totalPax = pax.adults + pax.children + pax.infants;
+    const segFares = selected.map((idx,i)=>{
+      const f = searchData.segments[i][idx];
+      return {f, fare: Math.round((parseFloat(f.fare||0) + parseFloat(f.fare||0)*0.10)*100)/100};
+    });
+    const fareSubtotal = segFares.reduce((a,{fare})=>a + fare*totalPax, 0);
+    const taxes = Math.round(fareSubtotal*0.10)*100/100;
+    const ancTotal = ancillaries.reduce((a,x)=>{
+      const anc = (searchData.ancillaries||[]).find(a=>a.id===x.ancillary_id);
+      return a + (anc?parseFloat(anc.price||0)*x.quantity:0);
+    }, 0);
+    const grandTotal = fareSubtotal + taxes + ancTotal;
+    const segList = selected.map((idx,i)=>{
+      const f = searchData.segments[i][idx];
+      return `<tr><td>${esc(f.flight_no)}</td><td>${esc(f.origin)} → ${esc(f.destination)}</td><td>${esc(f.flight_date||'')}</td><td>${esc(f.dep_time||'')}-${esc(f.arr_time||'')}</td><td>${money(f.fare||0, f.currency)}</td><td>${esc(selectedSeats[String(f.id)]||'—')}</td></tr>`;
+    }).join('');
     document.getElementById('confirmation').innerHTML = `<div class="success"><b>Booking confirmed.</b> Your PNR is <b>${esc(r.pnr)}</b>.</div>
       <div class="portal-grid">
-        <div class="portal-field"><label>PNR</label><input value="${esc(r.pnr)}" readonly /></div>
+        <div class="portal-field"><label>PNR / booking reference</label><input value="${esc(r.pnr)}" readonly /></div>
         <div class="portal-field"><label>Trace reference</label><input value="${esc(r.trace_id)}" readonly /></div>
-        <div class="portal-field"><label>Total</label><input value="${money(r.total)}" readonly /></div>
-        <div class="portal-field"><label>Segments / passengers</label><input value="${r.segments} / ${r.passengers}" readonly /></div>
-      </div><div style="margin-top:14px"><button class="portal-btn" onclick="prefillManage('${esc(r.pnr)}')">Manage / pay now</button></div>`;
+        <div class="portal-field"><label>Itinerary ID</label><input value="${esc(r.itinerary_id)}" readonly /></div>
+        <div class="portal-field"><label>Total amount paid</label><input value="${money(r.total)}" readonly /></div>
+      </div>
+      <div class="portal-card" style="margin-top:12px">
+        <h3 style="margin-top:0">Itemized receipt</h3>
+        <table style="width:100;border-collapse:collapse;font-size:12px"><thead><tr><th style="text-align:left">Segment</th><th style="text-align:left">Route</th><th style="text-align:left">Date</th><th style="text-align:left">Fare</th><th style="text-align:left">Seat</th></tr></thead><tbody>${segList}</tbody></table>
+        <div style="display:flex;justify-content:space-between;margin-top:8px;padding-top:8px;border-top:1px dashed #cfd8e3"><span>Fare subtotal</span><b>${money(fareSubtotal)}</b></div>
+        <div style="display:flex;justify-content:space-between"><span>Taxes &amp; fees (≈10%)</span><b>${money(taxes)}</b></div>
+        <div style="display:flex;justify-content:space-between"><span>Ancillary services</span><b>${money(ancTotal)}</b></div>
+        <div style="display:flex;justify-content:space-between;margin-top:6px"><span><b>Grand total</b></span><b style="color:#0b2a4a">${money(grandTotal)}</b></div>
+      </div>
+      <div style="margin-top:14px"><button class="portal-btn" onclick="prefillManage('${esc(r.pnr)}')">Manage / pay now</button>
+        <button class="portal-btn secondary" onclick="location.href='/portal/${tenant()}'">New booking</button></div>`;
     document.getElementById('confirmation').classList.remove('hidden');
     document.getElementById('confirmation').scrollIntoView({behavior:'smooth'});
   }catch(e){ msg.textContent=e.message; msg.classList.remove('hidden'); }
@@ -305,6 +513,35 @@ async function uploadTravelDoc(){
       title:document.getElementById('td-type').value,file_name:file.name,mime_type:file.type,file_base64:dataUrl})});
     msg.textContent='Document uploaded and linked to your booking'; loadMyTrips();
   }catch(e){ msg.textContent=e.message; }
+}
+
+async function uploadTravelDoc(){
+  const msg=document.getElementById('td-msg');
+  const file=document.getElementById('td-file').files[0];
+  if(!file){ msg.textContent='Choose a file first'; return; }
+  const dataUrl=await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result);r.onerror=rej;r.readAsDataURL(file);});
+  try{
+    await api('/api/portal/documents',{method:'POST',body:JSON.stringify({pnr:document.getElementById('td-pnr').value.trim(),
+      doc_type:document.getElementById('td-type').value,doc_no:document.getElementById('td-no').value.trim(),
+      title:document.getElementById('td-type').value,file_name:file.name,mime_type:file.type,file_base64:dataUrl})});
+    msg.textContent='Document uploaded and linked to your booking'; loadMyTrips();
+  }catch(e){ msg.textContent=e.message; }
+}
+
+async function refreshSuppliers(){
+  const box = document.getElementById('suppliers-list');
+  box.textContent = 'Loading suppliers...';
+  try{
+    const d = await api('/api/portal/suppliers?tenant='+encodeURIComponent(tenant()));
+    const items = d.suppliers||[];
+    if(!items.length){
+      box.innerHTML = '<div class="muted">No suppliers found.</div>';
+      return;
+    }
+    box.innerHTML = `<div style="max-height:400px;overflow-y:auto;">
+      ${items.map(x=>`<div style="margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #e5e7eb"><div style="display:flex;justify-space-between align-items:center;margin-bottom:4px"><span style="color:#374151">${esc(x.supplier_name||'—')}</span><span style="font-size:10px;color:#6b728b;text-transform:uppercase;letter-spacing:.5px">${esc(x.category||'General')}</span></div><div style="font-size:11px;color:#374151"><b>Contact:</b> ${esc(x.contact_person||'-')} <b>Email:</b> ${esc(x.email||'-')} <b>Phone:</b> ${esc(x.phone||'-')}</div><div style="font-size:10px;color:#9ca3a9;margin-top:2px">Balance: ${money(x.balance, x.currency)} · Status: ${x.status||'Active'}</div></div>`).join('')}
+    </div>`;
+  }catch(e){ box.innerHTML = '<div class="muted error">Error loading suppliers.</div>'; }
 }
 
 init().catch(e=>{ document.getElementById('airline-name').textContent='Portal unavailable'; });

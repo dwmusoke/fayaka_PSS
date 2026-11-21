@@ -53,90 +53,67 @@
           <button id="menu-toggle" class="icon-btn sidebar-toggle" aria-label="Toggle navigation"><svg class="icon"><use href="#i-menu"></use></svg></button>
         </div>
         <div class="tenant-box" id="tenant-box"></div>
-        <nav id="nav">
+<nav id="nav">
           <div class="nav-group">
-            <div class="nav-label">Airline PSS</div>
-            <a data-view="pss-overview"><svg class="icon"><use href="#i-chart"></use></svg><span>PSS Overview</span></a>
-            <a data-view="pss-flights"><svg class="icon"><use href="#i-booking"></use></svg><span>Flights &amp; Inventory</span></a>
+            <div class="nav-label">Home</div>
+            <a data-view="dashboard" class="active"><svg class="icon"><use href="#i-grid"></use></svg><span>Dashboard</span></a>
+            <a data-view="pss-overview"><svg class="icon"><use href="#i-chart"></use></span><span>PSS Overview</span></a>
+          </div>
+          <div class="nav-group">
+            <div class="nav-label">Operations</div>
+            <a data-view="pss-flights"><svg class="icon"><use href="#i-booking"></use></svg><span>Flights & Inventory</span></a>
             <a data-view="pss-bookings"><svg class="icon"><use href="#i-users"></use></svg><span>PNR / Bookings</span></a>
-            <a data-view="pss-stock"><svg class="icon"><use href="#i-file"></use></svg><span>Ticket Stock</span></a>
             <a data-view="pss-checkins"><svg class="icon"><use href="#i-task"></use></svg><span>Check-in</span></a>
-            <a data-view="pss-payments"><svg class="icon"><use href="#i-finance"></use></svg><span>Payment Tracking</span></a>
-            <a data-view="pss-airports"><svg class="icon"><use href="#i-setting"></use></svg><span>Airports</span></a>
-            <a data-view="pss-channels"><svg class="icon"><use href="#i-setting"></use></svg><span>Channels</span></a>
-            <a data-view="pss-agencies"><svg class="icon"><use href="#i-users"></use></svg><span>Agency Direct</span></a>
-            <a data-view="pss-direct"><svg class="icon"><use href="#i-file"></use></svg><span>Direct E-tickets</span></a>
-            <a data-view="pss-charters"><svg class="icon"><use href="#i-booking"></use></svg><span>Charter Business</span></a>
-            <a data-view="pss-charter-flights"><svg class="icon"><use href="#i-source"></use></svg><span>Charter Flights</span></a>
-            <a data-view="pss-trace"><svg class="icon"><use href="#i-task"></use></svg><span>Traceability</span></a>
-            <a data-view="pss-ancillaries"><svg class="icon"><use href="#i-file"></use></svg><span>Ancillary Catalog</span></a>
-            <a data-view="pss-ancillary-sales"><svg class="icon"><use href="#i-finance"></use></svg><span>Ancillary Sales</span></a>
-            <a data-view="pss-baggage"><svg class="icon"><use href="#i-booking"></use></svg><span>Baggage Rules</span></a>
-            <a data-view="pss-airport-docs"><svg class="icon"><use href="#i-file"></use></svg><span>Airport Requirements</span></a>
-            <a data-view="pss-weather"><svg class="icon"><use href="#i-chart"></use></svg><span>Weather</span></a>
-            <a data-view="pss-aftersales"><svg class="icon"><use href="#i-users"></use></svg><span>After Sales / Reputation</span></a>
-            <a data-view="pss-eticket-tracker"><svg class="icon"><use href="#i-task"></use></svg><span>E-ticketing Tracker</span></a>
             <a data-view="pss-ticket-status"><svg class="icon"><use href="#i-task"></use></svg><span>Ticket Status</span></a>
+            <a data-view="disruptions"><svg class="icon"><use href="#i-task"></use></svg><span>Disruptions</span></a>
+          </div>
+          <div class="nav-group">
+            <div class="nav-label">Inventory & Stock</div>
+            <a data-view="pss-stock"><svg class="icon"><use href="#i-file"></use></svg><span>Ticket Stock</span></a>
+            <a data-view="pss-channels"><svg class="icon"><use href="#i-setting"></use></svg><span>Channels</span></a>
+          </div>
+          <div class="nav-group">
+            <div class="nav-label">Travel Agency</div>
             <a data-view="pss-workspace"><svg class="icon"><use href="#i-users"></use></svg><span>Partner Workspace</span></a>
             <a data-view="pss-partner-users"><svg class="icon"><use href="#i-setting"></use></svg><span>Partner Logins</span></a>
-            <a data-view="pss-branches"><svg class="icon"><use href="#i-setting"></use></svg><span>Offices &amp; Branches</span></a>
-          </div>
-          <div class="nav-group">
-            <div class="nav-label">Overview</div>
-            <a data-view="dashboard" class="active"><svg class="icon"><use href="#i-grid"></use></svg><span>Dashboard</span></a>
-          </div>
-          <div class="nav-group">
-            <div class="nav-label">Travel</div>
             <a data-view="travelers"><svg class="icon"><use href="#i-users"></use></svg><span>Travelers</span></a>
+            <a data-view="crm"><svg class="icon"><use href="#i-users"></use></svg><span>Customers</span></a>
+          </div>
+          <div class="nav-group">
+            <div class="nav-label">Travel Items</div>
             <a data-view="orders"><svg class="icon"><use href="#i-booking"></use></svg><span>Travel Items</span></a>
             <a data-view="unused-tickets"><svg class="icon"><use href="#i-file"></use></svg><span>Unused Tickets</span></a>
-          </div>
-          <div class="nav-group">
-            <div class="nav-label">Customer & Sales</div>
-            <a data-view="crm"><svg class="icon"><use href="#i-users"></use></svg><span>Customers</span></a>
-            <a data-view="estimates"><svg class="icon"><use href="#i-file"></use></svg><span>Estimates</span></a>
-            <a data-view="partners"><svg class="icon"><use href="#i-users"></use></svg><span>Partners</span></a>
           </div>
           <div class="nav-group">
             <div class="nav-label">Finance</div>
             <a data-view="invoicing"><svg class="icon"><use href="#i-invoice"></use></svg><span>Invoices</span></a>
             <a data-view="credit-notes"><svg class="icon"><use href="#i-invoice"></use></svg><span>Credit Notes</span></a>
             <a data-view="payments"><svg class="icon"><use href="#i-finance"></use></svg><span>Payments</span></a>
-            <a data-view="bills"><svg class="icon"><use href="#i-finance"></use></svg><span>Bills</span></a>
-            <a data-view="expenses"><svg class="icon"><use href="#i-finance"></use></svg><span>Expenses</span></a>
-            <a data-view="journals"><svg class="icon"><use href="#i-file"></use></svg><span>Manual Journals</span></a>
+            <a data-view="refunds"><svg class="icon"><use href="#i-finance"></use></svg><span>Refund Management</span></a>
           </div>
           <div class="nav-group">
-            <div class="nav-label">Agency Setup</div>
+            <div class="nav-label">Setup</div>
             <a data-view="agency-profile"><svg class="icon"><use href="#i-setting"></use></svg><span>Agency Profile</span></a>
             <a data-view="setup-users"><svg class="icon"><use href="#i-users"></use></svg><span>Users</span></a>
             <a data-view="setup-products"><svg class="icon"><use href="#i-booking"></use></svg><span>Products</span></a>
             <a data-view="setup-currencies"><svg class="icon"><use href="#i-finance"></use></svg><span>Currencies</span></a>
-            <a data-view="setup-contacts"><svg class="icon"><use href="#i-users"></use></svg><span>Contacts</span></a>
-            <a data-view="setup-rules"><svg class="icon"><use href="#i-setting"></use></svg><span>Business Rules</span></a>
-            <a data-view="setup-preferences"><svg class="icon"><use href="#i-setting"></use></svg><span>Preferences</span></a>
-            <a data-view="setup-mail"><svg class="icon"><use href="#i-file"></use></svg><span>Mail Templates</span></a>
-            <a data-view="setup-integrations"><svg class="icon"><use href="#i-setting"></use></svg><span>Integrations</span></a>
           </div>
-          <div class="nav-group">
+<div class="nav-group">
             <div class="nav-label">Airline Finance</div>
             <a data-view="refunds"><svg class="icon"><use href="#i-finance"></use></svg><span>Refund Management</span></a>
             <a data-view="coupons"><svg class="icon"><use href="#i-file"></use></svg><span>Coupon Reporting</span></a>
             <a data-view="vouchers"><svg class="icon"><use href="#i-file"></use></svg><span>Vouchers</span></a>
-            <a data-view="bank-accounts"><svg class="icon"><use href="#i-finance"></use></svg><span>Cash &amp; Bank</span></a>
+            <a data-view="bank-accounts"><svg class="icon"><use href="#i-finance"></use></svg><span>Cash & Bank</span></a>
             <a data-view="bank-transactions"><svg class="icon"><use href="#i-finance"></use></svg><span>Bank Transactions</span></a>
             <a data-view="reconciliations"><svg class="icon"><use href="#i-chart"></use></svg><span>Reconciliations</span></a>
+            <a data-view="suppliers"><svg class="icon"><use href="#i-user"></use></span><span>Suppliers</span></a>
           </div>
           <div class="nav-group">
             <div class="nav-label">Control Center</div>
-            <a data-view="finance"><svg class="icon"><use href="#i-setting"></use></svg><span>Chart of Accounts &amp; Finance</span></a>
-            <a data-view="documents"><svg class="icon"><use href="#i-file"></use></svg><span>Documents & Sharing</span></a>
             <a data-view="sources"><svg class="icon"><use href="#i-source"></use></svg><span>Sources & Import</span></a>
             <a data-view="backoffice"><svg class="icon"><use href="#i-task"></use></svg><span>Operations Queue</span><b class="nav-count" id="nav-task-count"></b></a>
             <a data-view="analytics"><svg class="icon"><use href="#i-chart"></use></svg><span>MIS & Analytics</span></a>
-            <a data-view="notifications"><svg class="icon"><use href="#i-file"></use></svg><span>Notifications</span></a>
-            <a data-view="disruptions"><svg class="icon"><use href="#i-task"></use></svg><span>Disruptions</span></a>
-            <a data-view="intelligence"><svg class="icon"><use href="#i-chart"></use></svg><span>Intelligence</span></a>
+            <a data-view="documents"><svg class="icon"><use href="#i-file"></use></svg><span>Documents & Sharing</span></a>
             <a data-view="admin"><svg class="icon"><use href="#i-setting"></use></svg><span>Admin & Subscription</span></a>
           </div>
         </nav>
@@ -193,14 +170,34 @@
         <section id="view-pss-weather" class="view hidden"></section>
         <section id="view-pss-aftersales" class="view hidden"></section>
         <section id="view-pss-eticket-tracker" class="view hidden"></section>
-        <section id="view-pss-ticket-status" class="view hidden"></section>
+        <section id="view-pss-ticket-status" class="view hidden">
+      <div class="portal-card">
+        <div class="panel-head"><h3>Ticket Status</h3></div>
+        <div class="panel-body">
+          <div id="ticket-status-list" class="muted">Loading ticket statuses...</div>
+          <div style="margin-top:14px">
+            <button class="portal-btn secondary" onclick="refreshTicketStatus()">Refresh</button>
+          </div>
+        </div>
+      </div>
+    </section>
         <section id="view-pss-workspace" class="view hidden"></section>
         <section id="view-pss-partner-users" class="view hidden"></section>
         <section id="view-pss-branches" class="view hidden"></section>
         <section id="view-dashboard" class="view"></section>
         <section id="view-travelers" class="view hidden"></section>
         <section id="view-orders" class="view hidden"></section>
-  <section id="view-unused-tickets" class="view hidden"></section>
+  <section id="view-unused-tickets" class="view hidden">
+      <div class="portal-card">
+        <div class="panel-head"><h3>Unused Tickets</h3></div>
+        <div class="panel-body">
+          <div id="unused-tickets-list" class="muted">Loading unused tickets...</div>
+          <div style="margin-top:14px">
+            <button class="portal-btn secondary" onclick="refreshUnusedTickets()">Refresh</button>
+          </div>
+        </div>
+      </div>
+    </section>
         <section id="view-crm" class="view hidden"></section>
         <section id="view-estimates" class="view hidden"></section>
   <section id="view-partners" class="view hidden"></section>
@@ -233,8 +230,19 @@
   <section id="view-vouchers" class="view hidden"></section>
   <section id="view-bank-accounts" class="view hidden"></section>
   <section id="view-bank-transactions" class="view hidden"></section>
-  <section id="view-reconciliations" class="view hidden"></section>
-  <section id="view-intelligence" class="view hidden"></section>
+<section id="view-reconciliations" class="view hidden"></section>
+      <section id="view-suppliers" class="view hidden">
+        <div class="portal-card">
+          <div class="panel-head"><h3>Suppliers</h3></div>
+          <div class="panel-body">
+            <div id="suppliers-list" class="muted">Loading suppliers...</div>
+            <div style="margin-top:14px">
+              <button class="portal-btn secondary" onclick="refreshSuppliers()">Refresh</button>
+            </div>
+          </div>
+        </div>
+      </section>
+      <section id="view-intelligence" class="view hidden"></section>
       </main>
     </div>
   </div>
