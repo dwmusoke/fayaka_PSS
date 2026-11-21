@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import re
 import secrets
 import sqlite3
 import sys
@@ -8,18 +9,244 @@ from contextlib import contextmanager
 from datetime import datetime, date
 
 DB_PATH = os.environ.get("TRAVEL_ERP_DB", os.path.join(os.path.dirname(__file__), "data", "erp.db"))
+_raw_db_url = (os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL") or "").strip()
+if _raw_db_url.startswith("postgres://"):
+    _raw_db_url = "postgresql://" + _raw_db_url[len("postgres://"):]
+if _raw_db_url and "sslmode=" not in _raw_db_url and ("supabase.co" in _raw_db_url or "supabase.com" in _raw_db_url):
+    _raw_db_url += ("&" if "?" in _raw_db_url else "?") + "sslmode=require"
+DATABASE_URL = _raw_db_url
+USING_POSTGRES = DATABASE_URL.startswith("postgresql://")
 
 
 def now_iso():
     return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
 
+def _hash_password(password):
+    salt = os.urandom(16)
+    dk = hashlib.pbkdf2_hmac("sha256", (password or "").encode("utf-8"), salt, 210_000)
+    return f"v2${salt.hex()}${dk.hex()}"
+
+
+def _bootstrap_admin_password(conn):
+    password = (os.environ.get("ADMIN_PASSWORD") or "").strip()
+    if not password:
+        return
+    tenant = q(conn, "SELECT id FROM tenants WHERE code='demo'", one=True) or q(conn, "SELECT id FROM tenants ORDER BY id LIMIT 1", one=True)
+    if not tenant:
+        print("[bootstrap] ADMIN_PASSWORD set but no tenant found", file=sys.stderr)
+        return
+    admin = q(conn, "SELECT id FROM users WHERE tenant_id=? AND username='admin'", (tenant["id"],), one=True)
+    hashed = _hash_password(password)
+    if admin:
+        conn.execute("UPDATE users SET password=?, status='active' WHERE id=?", (hashed, admin["id"]))
+        print("[bootstrap] admin password updated from ADMIN_PASSWORD", file=sys.stderr)
+        return
+    branch = q(conn, "SELECT id FROM branches WHERE tenant_id=? ORDER BY id LIMIT 1", (tenant["id"],), one=True)
+    conn.execute("""INSERT INTO users(tenant_id,branch_id,username,password,full_name,email,role,status,created_at)
+                    VALUES (?,?,?,?,?,?,?,'active',?)""",
+                 (tenant["id"], branch["id"] if branch else None, "admin", hashed,
+                  "Demo Admin", "admin@demo.local", "admin", now_iso()))
+    print("[bootstrap] admin user created from ADMIN_PASSWORD", file=sys.stderr)
+
+
+def _pg_table_info(sql):
+    m = re.search(r"PRAGMA\s+table_info\(([\w\"']+)\)", sql, re.IGNORECASE)
+    if not m:
+        return None, None
+    table = m.group(1).strip().strip("\"'")
+    return (
+        "SELECT column_name AS name, udt_name AS type FROM information_schema.columns "
+        "WHERE table_schema='public' AND table_name=%s ORDER BY ordinal_position",
+        (table,),
+    )
+
+
+def _adapt_sql(sql, is_pg):
+    if not is_pg or sql is None:
+        return sql
+    s = str(sql)
+    # table/column introspection
+    if re.search(r"PRAGMA\s+table_info", s, re.IGNORECASE):
+        q, _ = _pg_table_info(s)
+        return q or "SELECT NULL AS name, NULL AS type WHERE FALSE"
+    if re.search(r"PRAGMA\s+foreign_keys", s, re.IGNORECASE):
+        return "SELECT 1"
+    # dialect conversions (DDL + DML)
+    s = re.sub(r"\bINTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT\b", "SERIAL PRIMARY KEY", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bINSERT\s+OR\s+IGNORE\s+INTO\b", "INSERT INTO", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bINSERT\s+OR\s+REPLACE\s+INTO\b", "INSERT INTO", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bdate\(\s*'now'\s*\)", "CURRENT_DATE::text", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bdatetime\(\s*'now'\s*\)", "NOW()::text", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bBLOB\b", "BYTEA", s)
+    if re.search(r"\bINSERT\s+OR\s+IGNORE\b", str(sql), re.IGNORECASE):
+        if "ON CONFLICT" not in s.upper():
+            s = s.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
+    # placeholders: SQLite ? -> psycopg %s
+    s = s.replace("?", "%s")
+    return s
+
+
+class _PGCursor:
+    def __init__(self, cur):
+        self._cur = cur
+        self.lastrowid = None
+
+    def execute(self, sql, args=None):
+        return self
+
+    def fetchone(self):
+        return self._cur.fetchone()
+
+    def fetchall(self):
+        return self._cur.fetchall()
+
+    @property
+    def description(self):
+        return self._cur.description
+
+    @property
+    def rowcount(self):
+        return self._cur.rowcount
+
+    def close(self):
+        try:
+            self._cur.close()
+        except Exception:
+            pass
+
+
+class _PGConn:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def _prepare(self, sql, args=None):
+        raw = str(sql) if sql is not None else sql
+        params = args
+        if raw is not None and re.search(r"PRAGMA\s+table_info", raw, re.IGNORECASE):
+            adapted, params = _pg_table_info(raw)
+            return adapted, params or ()
+        adapted = _adapt_sql(raw, True)
+        if params is None:
+            params = ()
+        return adapted, params
+
+    def _has_id_column(self, table):
+        cur = self._conn.cursor()
+        try:
+            cur.execute(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_schema='public' AND table_name=%s AND column_name='id' LIMIT 1",
+                (table.lower(),),
+            )
+            return cur.fetchone() is not None
+        finally:
+            cur.close()
+
+    def execute(self, sql, args=None):
+        adapted, params = self._prepare(sql, args)
+        wants_id = False
+        if isinstance(adapted, str):
+            st = adapted.lstrip()
+            m = re.match(r"INSERT\s+INTO\s+([A-Za-z_][\w]*)", st, re.IGNORECASE)
+            if m and "RETURNING" not in st.upper() and self._has_id_column(m.group(1)):
+                wants_id = True
+        cur = self._conn.cursor()
+        if wants_id:
+            stmt = adapted.rstrip().rstrip(";") + " RETURNING id"
+            try:
+                cur.execute("SAVEPOINT _insret")
+                cur.execute(stmt, params)
+                wrapper = _PGCursor(cur)
+                row = cur.fetchone()
+                if row and "id" in row:
+                    wrapper.lastrowid = row["id"]
+                elif row:
+                    wrapper.lastrowid = next(iter(row.values()))
+                cur.execute("RELEASE SAVEPOINT _insret")
+                return wrapper
+            except Exception:
+                try:
+                    cur.execute("ROLLBACK TO SAVEPOINT _insret")
+                    cur.execute("RELEASE SAVEPOINT _insret")
+                except Exception:
+                    pass
+                cur = self._conn.cursor()
+                cur.execute(adapted, params)
+                return _PGCursor(cur)
+        cur.execute(adapted, params)
+        return _PGCursor(cur)
+
+    def executemany(self, sql, seq_of_params):
+        adapted = _adapt_sql(str(sql), True)
+        cur = self._conn.cursor()
+        cur.executemany(adapted, seq_of_params)
+        return _PGCursor(cur)
+
+    def executescript(self, sql_script):
+        # naive split for simple DDL/scripts
+        for stmt in str(sql_script).split(";"):
+            s = stmt.strip()
+            if not s:
+                continue
+            self.execute(s)
+
+    def commit(self):
+        self._conn.commit()
+
+    def rollback(self):
+        self._conn.rollback()
+
+    def close(self):
+        self._conn.close()
+
+    def cursor(self):
+        return _PGCursor(self._conn.cursor())
+
+
+class _SQLiteConn:
+    """Thin wrapper so we can normalize behavior if needed."""
+    def __init__(self, conn):
+        self._conn = conn
+
+    def execute(self, sql, args=None):
+        if args is None:
+            return self._conn.execute(sql)
+        return self._conn.execute(sql, args)
+
+    def executemany(self, sql, seq_of_params):
+        return self._conn.executemany(sql, seq_of_params)
+
+    def executescript(self, sql_script):
+        return self._conn.executescript(sql_script)
+
+    def commit(self):
+        self._conn.commit()
+
+    def rollback(self):
+        self._conn.rollback()
+
+    def close(self):
+        self._conn.close()
+
+    def cursor(self):
+        return self._conn.cursor()
+
+
 def get_conn():
+    if USING_POSTGRES:
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except Exception as e:
+            raise RuntimeError("DATABASE_URL is set but psycopg is not installed. Run: pip install -r requirements.txt") from e
+        conn = psycopg.connect(DATABASE_URL, autocommit=False, row_factory=dict_row)
+        return _PGConn(conn)
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+    return _SQLiteConn(conn)
 
 
 @contextmanager
@@ -28,6 +255,12 @@ def db():
     try:
         yield conn
         conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
     finally:
         conn.close()
 
@@ -1463,6 +1696,7 @@ def init_db():
         seed_accounting(conn)
         seed_setup(conn)
         seed_pss(conn)
+        _bootstrap_admin_password(conn)
 
 
 def _add_columns(conn, table, cols):
@@ -2032,6 +2266,7 @@ def ensure_pss(conn):
 
 def seed_pss(conn):
     ts = now_iso()
+    seeded_creds = []
     tenants = [r['id'] for r in q(conn, "SELECT id FROM tenants")]
     airports = [
         ('KLA', 'HUKD', 'Entebbe International', 'Entebbe', 'Uganda', 'Africa/Kampala', 'Main', 'East Africa', 1),
@@ -2150,6 +2385,7 @@ def seed_pss(conn):
                 VALUES (?,?,?,?,?,?,?,?,'current',?,?)""", (tid, code, cond, temp, wind, vis, adv, ts, ts, ts))
 
 
+    seeded_creds = []
     for tid in tenants:
         branches = [
             ('FA-HQ', 'Fayaka Head Office', 'Kampala', 'Uganda', 'HQ'),
@@ -2206,6 +2442,8 @@ def seed_pss(conn):
                                 VALUES (?,?,?,?,?,?,'active',?)""",
                              (tid, hq['id'] if hq else None, uname, wpw, full, role, ts))
                 seeded_creds.append(f"tenant_id={tid} user={uname} password={wpw}")
+    if seeded_creds:
+        print("[seed] PSS user credentials - change these immediately: " + ", ".join(seeded_creds), file=sys.stderr)
 
 
 def seed(conn):
