@@ -4559,8 +4559,12 @@ class Handler(BaseHTTPRequestHandler):
         committed = int((q(conn, sql, params, one=True) or {}).get('n') or 0)
         rules = q(conn, """SELECT * FROM pss_inventory_rules
                            WHERE tenant_id=? AND status='active'
-                           AND (pos='ALL' OR pos=?) AND (subclass='ALL' OR subclass=?)""",
-                  (tenant_id, pos, subclass))
+                           AND (pos='ALL' OR pos=?) AND (subclass='ALL' OR subclass=?)
+                           AND (flight_id IS NULL OR flight_id=?)
+                           AND (flight_date IS NULL OR flight_date='' OR flight_date=?)
+                           AND (segment_id IS NULL OR segment_id=?)
+                           ORDER BY priority ASC, id ASC""",
+                  (tenant_id, pos, subclass, flight['id'], flight.get('flight_date'), None))
         cap = capacity
         nest_caps = {'serial': cap, 'parallel': cap, 'mixed': cap}
         for r in rules:
@@ -4786,19 +4790,24 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({'ok': True})
             if not data.get('rule_code') or not data.get('rule_name'):
                 return self._json({'error': 'rule_code and rule_name are required'}, 400)
+            flight_id = self._oid(data.get('flight_id'))
+            segment_id = self._oid(data.get('segment_id'))
             values = (tenant_id, str(data.get('rule_code') or '').upper(), data.get('rule_name'),
                       data.get('rule_type') or 'limit', data.get('pos') or 'ALL', data.get('subclass') or 'ALL',
                       float(data.get('value') or 0), 1 if data.get('tia_enabled') else 0,
                       float(data.get('tia_percent') or 0), data.get('status') or 'active',
-                      data.get('effective_from'), data.get('effective_to'), now_iso())
+                      data.get('effective_from'), data.get('effective_to'),
+                      flight_id, data.get('flight_date') or None, segment_id,
+                      data.get('nest_type') or 'none', data.get('nest_bucket') or None, int(data.get('priority') or 100),
+                      now_iso())
             if current:
-                conn.execute("""UPDATE pss_inventory_rules SET rule_code=?,rule_name=?,rule_type=?,pos=?,subclass=?,value=?,tia_enabled=?,tia_percent=?,status=?,effective_from=?,effective_to=?,updated_at=?
+                conn.execute("""UPDATE pss_inventory_rules SET rule_code=?,rule_name=?,rule_type=?,pos=?,subclass=?,value=?,tia_enabled=?,tia_percent=?,status=?,effective_from=?,effective_to=?,flight_id=?,flight_date=?,segment_id=?,nest_type=?,nest_bucket=?,priority=?,updated_at=?
                                 WHERE id=? AND tenant_id=?""", values[1:] + (rid, tenant_id))
                 self._inv_log(conn, tenant_id, 'rule', rid, 'updated', dict(current), data, user_id)
             else:
                 cur = conn.execute("""INSERT INTO pss_inventory_rules
-                                      (tenant_id,rule_code,rule_name,rule_type,pos,subclass,value,tia_enabled,tia_percent,status,effective_from,effective_to,created_at,updated_at)
-                                      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", values + (now_iso(),))
+                                      (tenant_id,rule_code,rule_name,rule_type,pos,subclass,value,tia_enabled,tia_percent,status,effective_from,effective_to,flight_id,flight_date,segment_id,nest_type,nest_bucket,priority,created_at,updated_at)
+                                      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", values + (now_iso(),))
                 rid = cur.lastrowid
                 self._inv_log(conn, tenant_id, 'rule', rid, 'created', {}, data, user_id)
             log_audit(conn, tenant_id, user_id, 'inventory_rule_saved', 'pss_inventory_rules', rid, data)

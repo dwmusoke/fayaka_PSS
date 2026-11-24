@@ -1467,6 +1467,12 @@ CREATE TABLE IF NOT EXISTS pss_inventory_rules (
   status TEXT DEFAULT 'active',
   effective_from TEXT,
   effective_to TEXT,
+  flight_id INTEGER,
+  flight_date TEXT,
+  segment_id INTEGER,
+  nest_type TEXT DEFAULT 'none',
+  nest_bucket TEXT,
+  priority INTEGER DEFAULT 100,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(tenant_id, rule_code)
@@ -2672,7 +2678,8 @@ def ensure_pss(conn):
                          ('schedule_group', 'TEXT'), ('frequency', "TEXT DEFAULT 'once'")]),
         ('pss_stock_allocations', [('agency_id', 'INTEGER'), ('unit_price', 'REAL DEFAULT 0'), ('total_amount', 'REAL DEFAULT 0'),
                                    ('currency', "TEXT DEFAULT 'USD'"), ('wallet_tx_id', 'INTEGER')]),
-        ('pss_inventory_rules', [('nest_type', "TEXT DEFAULT 'none'"), ('nest_bucket', 'TEXT'), ('priority', 'INTEGER DEFAULT 100')]),
+        ('pss_inventory_rules', [('nest_type', "TEXT DEFAULT 'none'"), ('nest_bucket', 'TEXT'), ('priority', 'INTEGER DEFAULT 100'),
+                                 ('flight_id', 'INTEGER'), ('flight_date', 'TEXT'), ('segment_id', 'INTEGER')]),
     ]:
         existing = {r['name'] for r in q(conn, f"PRAGMA table_info({table})")}
         for col, ddl in cols:

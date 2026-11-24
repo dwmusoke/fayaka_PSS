@@ -2269,9 +2269,12 @@ async function renderInventoryPanel(el, dates, over, uncommitted){
     const data = await api('/api/pss/inventory/rules').catch(()=>({rules:[]}));
     INVENTORY_UI.cache.rules = data.rules||[];
     const fields = [
-      {name:'rule_code',label:'Code',placeholder:'HOLD_EXPIRY'},
+      {name:'rule_code',label:'Code',placeholder:'SEG_LIMIT_Y'},
       {name:'rule_name',label:'Name'},
       {name:'rule_type',label:'Type',type:'select',options:[{value:'limit',label:'Segment limit'},{value:'gate',label:'Gating'},{value:'pos_subclass',label:'POS subclass logic'},{value:'hold_expiry',label:'Hold expiry'}]},
+      {name:'flight_id',label:'Flight ID (optional)',type:'number'},
+      {name:'flight_date',label:'Flight date (optional)',type:'date'},
+      {name:'segment_id',label:'Segment ID (optional)',type:'number'},
       {name:'nest_type',label:'Nesting',type:'select',options:[{value:'none',label:'none'},{value:'serial',label:'serial'},{value:'parallel',label:'parallel'},{value:'mixed',label:'mixed'}]},
       {name:'nest_bucket',label:'Nest bucket',placeholder:'Y/J/F'},
       {name:'priority',label:'Priority',type:'number',placeholder:'100'},
