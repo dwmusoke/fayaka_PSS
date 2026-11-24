@@ -599,7 +599,7 @@ function inputFor(key, val, required){
 function fieldLabel(key){ return esc(String(key).replace(/[_]/g,' ').replace(/\b\w/g,c=>c.toUpperCase())); }
 function moneyCell(v){ return v===null||v===undefined||v===''?'-':money(Number(v||0)); }
 function cellFor(key, val){
-  if(key==='amount'||key==='total'||key==='balance'||key==='fare'||key==='margin'||key==='sell'||key==='cost'||key==='paid'||key==='revenue'||key==='expenses') return moneyCell(val);
+  if(key==='amount'||key==='total'||key==='balance'||key==='fare'||key==='margin'||key==='sell'||key==='cost'||key==='paid'||key==='revenue'||key==='expenses') return (typeof val==='string' && /[A-Z]{3}/.test(val)) ? val : moneyCell(val);
   if(key==='status') return statusBadge(val);
   if(key==='is_active'||key==='active') return (val?`<span class="badge good">active</span>`:`<span class="badge bad">inactive</span>`);
   if(val===null||val===undefined||val==='') return `<span class="muted">-</span>`;
