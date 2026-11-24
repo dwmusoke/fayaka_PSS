@@ -5081,16 +5081,23 @@ class Handler(BaseHTTPRequestHandler):
         return self._json({'ok': True, 'refreshed': len(rows)})
 
     def api_inventory_help(self):
-        return self._json({'articles': [
-            {'title': 'Flight date inventory', 'body': 'Open Flight Inventory, choose a flight date tab, then inspect legs, segments, reservation impact and capacity.'},
-            {'title': 'Leg and Segment controls', 'body': 'Use Legs and Segments tabs to add, edit or delete itinerary structure. Segment-level availability is published per segment; rule scope can target flight/date/segment.'},
-            {'title': 'Availability and POS', 'body': 'Choose Point of Sale and subclass, then Publish availability. Availability is calculated as capacity-committed with Segment limit, Gating, POS subclass logic, TIA and nesting adjustments. Screen polls every 15 seconds.'},
-            {'title': 'Business rules and TIA', 'body': 'Rules support Segment limit, Gating, POS subclass logic, Hold expiry. Scope by flight/date/segment, POS/subclass, nesting (serial/parallel/mixed), priority, and TIA % adjustment.'},
-            {'title': 'Overbooking', 'body': 'Overbooking tab lists flights where committed reservations exceed capacity. Resolve raises capacity and closes the queue item; use history/queue for audit.'},
-            {'title': 'Uncommitted bookings', 'body': 'Holds expire automatically when accessed after expiry. Confirm converts a hold to a reservation; release restores one seat.'},
-            {'title': 'Market data & valuation', 'body': 'Market data snapshots internal route/date demand and average fare. Active valuation computes load-factor value; manual valuations can be stored as active.'},
-            {'title': 'Self-service support', 'body': 'Use this Help tab first. If an action fails, copy the error/toast and check README/DEPLOYMENT.md or contact your administrator.'}
-        ]})
+        return self._json({
+            'articles': [
+                {'title': 'Flight date inventory', 'body': 'Open Flight Inventory, choose a flight date tab, then inspect legs, segments, reservation impact and capacity.'},
+                {'title': 'Leg and Segment controls', 'body': 'Use Legs and Segments tabs to add, edit or delete itinerary structure. Segment-level availability is published per segment; rule scope can target flight/date/segment.'},
+                {'title': 'Availability and POS', 'body': 'Choose Point of Sale and subclass, then Publish availability. Availability is calculated as capacity-committed with Segment limit, Gating, POS subclass logic, TIA and nesting adjustments. Screen polls every 15 seconds.'},
+                {'title': 'Business rules and TIA', 'body': 'Rules support Segment limit, Gating, POS subclass logic, Hold expiry. Scope by flight/date/segment, POS/subclass, nesting (serial/parallel/mixed), priority, and TIA % adjustment.'},
+                {'title': 'Overbooking', 'body': 'Overbooking tab lists flights where committed reservations exceed capacity. Actions: raise capacity, deny sale, or reaccommodate latest hold to alternate flight. Use History/Queue for audit.'},
+                {'title': 'Uncommitted bookings', 'body': 'Holds expire automatically when accessed after expiry. Confirm converts a hold to a reservation; release restores one seat.'},
+                {'title': 'Market data & valuation', 'body': 'Market data snapshots internal route/date demand and average fare. Active valuation computes load-factor value; manual valuations can be stored as active.'},
+                {'title': 'Self-service support', 'body': 'Use this Help tab first. If an action fails, copy the error/toast and check docs or contact your administrator.'}
+            ],
+            'docs': [
+                {'title': 'README', 'url': '/README.md'},
+                {'title': 'Deployment', 'url': '/DEPLOYMENT.md'},
+                {'title': 'API Docs', 'url': '/api/public/v1/docs'}
+            ]
+        })
 
     def api_pss_bookings(self, tenant_id, method, bid=None, user_id=None, sess=None):
         with db() as conn:
