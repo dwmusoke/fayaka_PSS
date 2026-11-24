@@ -4639,18 +4639,12 @@ class Handler(BaseHTTPRequestHandler):
         pos = (qs.get('pos') or ['ALL'])[0]
         subclass = (qs.get('subclass') or ['ALL'])[0]
         with db() as conn:
+            self._inv_publish(conn, tenant_id)
             rows = q(conn, """SELECT a.*, f.flight_no, f.origin, f.destination, f.flight_date
                               FROM pss_inventory_availability a JOIN pss_flights f ON f.id=a.flight_id
                               WHERE a.tenant_id=? AND (a.pos=? OR a.pos='ALL') AND (a.pos_subclass=? OR a.pos_subclass='ALL')
                               ORDER BY f.flight_date, f.flight_no, a.pos, a.pos_subclass LIMIT 500""",
                      (tenant_id, pos, subclass))
-            if not rows:
-                self._inv_publish(conn, tenant_id)
-                rows = q(conn, """SELECT a.*, f.flight_no, f.origin, f.destination, f.flight_date
-                                  FROM pss_inventory_availability a JOIN pss_flights f ON f.id=a.flight_id
-                                  WHERE a.tenant_id=? AND (a.pos=? OR a.pos='ALL') AND (a.pos_subclass=? OR a.pos_subclass='ALL')
-                                  ORDER BY f.flight_date, f.flight_no, a.pos, a.pos_subclass LIMIT 500""",
-                         (tenant_id, pos, subclass))
         return self._json({'availability': rows, 'pos': pos, 'subclass': subclass,
                            'poll_key': max([str(r.get('published_at') or '') for r in rows] or [''])})
 
