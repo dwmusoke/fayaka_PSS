@@ -4562,24 +4562,43 @@ class Handler(BaseHTTPRequestHandler):
                            AND (pos='ALL' OR pos=?) AND (subclass='ALL' OR subclass=?)""",
                   (tenant_id, pos, subclass))
         cap = capacity
+        nest_caps = {'serial': cap, 'parallel': cap, 'mixed': cap}
         for r in rules:
             try:
                 value = float(r.get('value') or 0)
             except Exception:
                 value = 0
             rtype = str(r.get('rule_type') or '')
+            nest = str(r.get('nest_type') or 'none').lower()
             if rtype == 'limit' and value > 0:
-                cap = min(cap, int(value))
+                if nest in nest_caps: nest_caps[nest] = min(nest_caps[nest], int(value))
+                else: cap = min(cap, int(value))
             elif rtype == 'gate' and value > 0:
                 threshold = value / 100 if value > 1 else value
                 if capacity and committed / capacity >= threshold:
-                    cap = min(cap, committed)
+                    target = min(cap, committed)
+                    if nest in nest_caps: nest_caps[nest] = min(nest_caps[nest], target)
+                    else: cap = min(cap, committed)
             elif rtype == 'pos_subclass' and value > 0:
-                cap = max(0, cap - int(value))
+                if nest in nest_caps: nest_caps[nest] = max(0, nest_caps[nest] - int(value))
+                else: cap = max(0, cap - int(value))
             if r.get('tia_enabled') and r.get('tia_percent'):
-                cap += int(capacity * float(r['tia_percent']) / 100)
+                adj = int(capacity * float(r['tia_percent']) / 100)
+                if nest in nest_caps: nest_caps[nest] += adj
+                else: cap += adj
+        # nesting: serial=min (most restrictive), parallel=max (shared), mixed=average
+        active_nests = [v for k,v in nest_caps.items() if any(str(rr.get('nest_type') or '').lower()==k for rr in rules)]
+        if active_nests:
+            serial_cap = nest_caps['serial'] if any(str(rr.get('nest_type') or '').lower()=='serial' for rr in rules) else cap
+            parallel_cap = nest_caps['parallel'] if any(str(rr.get('nest_type') or '').lower()=='parallel' for rr in rules) else cap
+            mixed_cap = nest_caps['mixed'] if any(str(rr.get('nest_type') or '').lower()=='mixed' for rr in rules) else cap
+            nest_vals = []
+            if any(str(rr.get('nest_type') or '').lower()=='serial' for rr in rules): nest_vals.append(serial_cap)
+            if any(str(rr.get('nest_type') or '').lower()=='parallel' for rr in rules): nest_vals.append(parallel_cap)
+            if any(str(rr.get('nest_type') or '').lower()=='mixed' for rr in rules): nest_vals.append(mixed_cap)
+            if nest_vals: cap = min(cap, min(nest_vals))
         available = max(0, int(cap) - committed)
-        return {'capacity': int(capacity), 'adjusted_capacity': int(cap), 'committed': committed, 'available': available}
+        return {'capacity': int(capacity), 'adjusted_capacity': int(cap), 'committed': committed, 'available': available, 'nesting': {k:v for k,v in nest_caps.items()}}
 
     def _inv_publish(self, conn, tenant_id, actor=None):
         flights = self._inv_baseline(conn, tenant_id)

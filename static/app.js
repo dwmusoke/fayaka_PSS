@@ -2271,7 +2271,10 @@ async function renderInventoryPanel(el, dates, over, uncommitted){
     const fields = [
       {name:'rule_code',label:'Code',placeholder:'HOLD_EXPIRY'},
       {name:'rule_name',label:'Name'},
-      {name:'rule_type',label:'Type',type:'select',options:[{value:'limit',label:'limit'},{value:'gate',label:'gate'},{value:'pos_subclass',label:'pos_subclass'},{value:'hold_expiry',label:'hold_expiry'}]},
+      {name:'rule_type',label:'Type',type:'select',options:[{value:'limit',label:'Segment limit'},{value:'gate',label:'Gating'},{value:'pos_subclass',label:'POS subclass logic'},{value:'hold_expiry',label:'Hold expiry'}]},
+      {name:'nest_type',label:'Nesting',type:'select',options:[{value:'none',label:'none'},{value:'serial',label:'serial'},{value:'parallel',label:'parallel'},{value:'mixed',label:'mixed'}]},
+      {name:'nest_bucket',label:'Nest bucket',placeholder:'Y/J/F'},
+      {name:'priority',label:'Priority',type:'number',placeholder:'100'},
       {name:'pos',label:'POS',placeholder:'ALL'},
       {name:'subclass',label:'Subclass',placeholder:'ALL'},
       {name:'value',label:'Value',type:'number',placeholder:'20'},

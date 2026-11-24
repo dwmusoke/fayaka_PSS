@@ -2672,6 +2672,7 @@ def ensure_pss(conn):
                          ('schedule_group', 'TEXT'), ('frequency', "TEXT DEFAULT 'once'")]),
         ('pss_stock_allocations', [('agency_id', 'INTEGER'), ('unit_price', 'REAL DEFAULT 0'), ('total_amount', 'REAL DEFAULT 0'),
                                    ('currency', "TEXT DEFAULT 'USD'"), ('wallet_tx_id', 'INTEGER')]),
+        ('pss_inventory_rules', [('nest_type', "TEXT DEFAULT 'none'"), ('nest_bucket', 'TEXT'), ('priority', 'INTEGER DEFAULT 100')]),
     ]:
         existing = {r['name'] for r in q(conn, f"PRAGMA table_info({table})")}
         for col, ddl in cols:
