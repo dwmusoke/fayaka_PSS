@@ -1135,6 +1135,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.api_inventory_queue(tenant_id)
             if path.startswith('/api/pss/inventory/queue/') and path.endswith('/resolve') and method == 'POST':
                 return self.api_inventory_queue_resolve(tenant_id, user_id, path.split('/')[5])
+            if path.startswith('/api/pss/inventory/queue/') and method == 'PUT':
+                return self.api_inventory_queue(tenant_id, 'PUT', path.split('/')[5], user_id)
             if path == '/api/pss/inventory/valuation' and method == 'GET':
                 return self.api_inventory_valuation(tenant_id)
             if path == '/api/pss/inventory/valuation' and method == 'POST':

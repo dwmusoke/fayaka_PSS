@@ -2295,9 +2295,9 @@ async function renderInventoryPanel(el, dates, over, uncommitted){
   }
   if(tab==='overbooking'){
     const data = await api('/api/pss/inventory/overbooking').catch(()=>({overbookings:[]}));
-    const rows = (data.overbookings||[]).map(r=>[esc(r.flight_no||''),esc(r.flight_date||''),esc(r.capacity||0),esc(r.committed||0),esc(r.available_seats||0),`<span class="badge bad">+${esc(r.excess||0)}</span>`,`<button class="mini-btn primary" data-inv-resolve-over="${esc(r.flight_id)}">Resolve</button>`]);
-    panel.innerHTML = `<div class="panel"><div class="panel-head"><h3>Overbooking detection</h3></div><div class="panel-body">${invTable(['Flight','Date','Capacity','Committed','Available','Excess',''],rows,'No overbookings detected')}</div></div>`;
-    $$('[data-inv-resolve-over]', panel).forEach(btn=>{ btn.onclick=async()=>{ try{ await api('/api/pss/inventory/overbooking/resolve',{method:'POST',body:JSON.stringify({flight_id:btn.getAttribute('data-inv-resolve-over')})}); toast('Overbooking resolved'); render_flight_inventory(el); }catch(err){ toast(err.message,'error'); } }; });
+    const rows = (data.overbookings||[]).map(r=>[esc(r.flight_no||''),esc(r.flight_date||''),esc(r.capacity||0),esc(r.committed||0),esc(r.available_seats||0),`<span class="badge bad">+${esc(r.excess||0)}</span>`,`<select class="form-select" style="min-width:160px" data-over-action="${esc(r.flight_id)}"><option value="raise_capacity">Raise capacity</option><option value="deny_sale">Deny sale (close)</option><option value="reaccommodate">Reaccommodate hold</option></select> <button class="mini-btn primary" data-inv-resolve-over="${esc(r.flight_id)}">Apply</button>`]);
+    panel.innerHTML = `<div class="panel"><div class="panel-head"><h3>Overbooking detection</h3></div><div class="panel-body">${invTable(['Flight','Date','Capacity','Committed','Available','Excess','Action'],rows,'No overbookings detected')}</div></div>`;
+    $$('[data-inv-resolve-over]', panel).forEach(btn=>{ btn.onclick=async()=>{ const fid=btn.getAttribute('data-inv-resolve-over'); const action=$(`[data-over-action="${fid}"]`,panel)?.value||'raise_capacity'; try{ await api('/api/pss/inventory/overbooking/resolve',{method:'POST',body:JSON.stringify({flight_id:fid,action})}); toast('Overbooking action applied'); render_flight_inventory(el); }catch(e){ toast(e.message,'error'); } }; });
     return;
   }
   if(tab==='history'){
@@ -2308,9 +2308,10 @@ async function renderInventoryPanel(el, dates, over, uncommitted){
   }
   if(tab==='queue'){
     const data = await api('/api/pss/inventory/queue').catch(()=>({queue:[]}));
-    const rows = (data.queue||[]).map(q=>[esc(q.created_at||''),esc(q.issue_type||''),esc(q.severity||''),esc(q.flight_no||''),esc(q.message||''),q.status==='open'?`<button class="mini-btn primary" data-inv-resolve-queue="${esc(q.id)}">Resolve</button>`:`<span class="badge good">${esc(q.status)}</span>`]);
-    panel.innerHTML = `<div class="panel"><div class="panel-head"><h3>Inventory queue monitoring</h3></div><div class="panel-body">${invTable(['When','Issue','Severity','Flight','Message',''],rows,'Queue is clear')}</div></div>`;
-    $$('[data-inv-resolve-queue]', panel).forEach(btn=>{ btn.onclick=async()=>{ try{ await api('/api/pss/inventory/queue/'+encodeURIComponent(btn.getAttribute('data-inv-resolve-queue'))+'/resolve',{method:'POST',body:'{}'}); toast('Queue item resolved'); render_flight_inventory(el); }catch(err){ toast(err.message,'error'); } }; });
+    const rows = (data.queue||[]).map(q=>[esc(q.created_at||''),esc(q.issue_type||''),`<select class="form-select" style="min-width:90px" data-q-sev="${esc(q.id)}"><option ${q.severity==='warning'?'selected':''}>warning</option><option ${q.severity==='critical'?'selected':''}>critical</option><option ${q.severity==='info'?'selected':''}>info</option></select>`,esc(q.flight_no||''),esc(q.message||''),`<input class="form-input" style="min-width:120px" data-q-assignee="${esc(q.id)}" value="${esc(q.assignee||'')}" placeholder="assignee">`,q.status==='open'?`<button class="mini-btn" data-inv-save-queue="${esc(q.id)}">Save</button> <button class="mini-btn primary" data-inv-resolve-queue="${esc(q.id)}">Resolve</button>`:`<span class="badge good">${esc(q.status)}</span>`]);
+    panel.innerHTML = `<div class="panel"><div class="panel-head"><h3>Inventory queue monitoring</h3></div><div class="panel-body">${invTable(['When','Issue','Severity','Flight','Message','Assignee',''],rows,'Queue is clear')}</div></div>`;
+    $$('[data-inv-save-queue]', panel).forEach(btn=>{ btn.onclick=async()=>{ const id=btn.getAttribute('data-inv-save-queue'); try{ await api('/api/pss/inventory/queue/'+encodeURIComponent(id),{method:'PUT',body:JSON.stringify({severity:$(`[data-q-sev="${id}"]`,panel)?.value,assignee:$(`[data-q-assignee="${id}"]`,panel)?.value})}); toast('Queue updated'); }catch(e){ toast(e.message,'error'); } }; });
+    $$('[data-inv-resolve-queue]', panel).forEach(btn=>{ btn.onclick=async()=>{ try{ await api('/api/pss/inventory/queue/'+encodeURIComponent(btn.getAttribute('data-inv-resolve-queue'))+'/resolve',{method:'POST',body:'{}'}); toast('Queue item resolved'); render_flight_inventory(el); }catch(e){ toast(e.message,'error'); } }; });
     return;
   }
   if(tab==='valuation'){
