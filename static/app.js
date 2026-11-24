@@ -2266,15 +2266,22 @@ async function renderInventoryPanel(el, dates, over, uncommitted){
     return;
   }
   if(tab==='rules'){
-    const data = await api('/api/pss/inventory/rules').catch(()=>({rules:[]}));
+    const [data, inv] = await Promise.all([
+      api('/api/pss/inventory/rules').catch(()=>({rules:[]})),
+      api('/api/pss/inventory/dates').catch(()=>({flights:[]}))
+    ]);
     INVENTORY_UI.cache.rules = data.rules||[];
+    const flights = inv.flights||[];
+    const segOpts = [{value:'',label:'All segments'}];
+    flights.forEach(f=> (f.segments||[]).forEach(s=> segOpts.push({value:String(s.id), label:`${f.flight_no||f.id} seg ${s.segment_no||s.id} ${s.origin||''}-${s.destination||''}`})));
+    const flightOpts = [{value:'',label:'All flights'}].concat(flights.map(f=>({value:String(f.id), label:`${f.flight_no||f.id} ${f.flight_date||''} ${f.origin||''}-${f.destination||''}`})));
     const fields = [
       {name:'rule_code',label:'Code',placeholder:'SEG_LIMIT_Y'},
       {name:'rule_name',label:'Name'},
       {name:'rule_type',label:'Type',type:'select',options:[{value:'limit',label:'Segment limit'},{value:'gate',label:'Gating'},{value:'pos_subclass',label:'POS subclass logic'},{value:'hold_expiry',label:'Hold expiry'}]},
-      {name:'flight_id',label:'Flight ID (optional)',type:'number'},
+      {name:'flight_id',label:'Flight scope',type:'select',options:flightOpts},
       {name:'flight_date',label:'Flight date (optional)',type:'date'},
-      {name:'segment_id',label:'Segment ID (optional)',type:'number'},
+      {name:'segment_id',label:'Segment scope',type:'select',options:segOpts},
       {name:'nest_type',label:'Nesting',type:'select',options:[{value:'none',label:'none'},{value:'serial',label:'serial'},{value:'parallel',label:'parallel'},{value:'mixed',label:'mixed'}]},
       {name:'nest_bucket',label:'Nest bucket',placeholder:'Y/J/F'},
       {name:'priority',label:'Priority',type:'number',placeholder:'100'},
