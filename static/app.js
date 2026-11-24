@@ -1953,6 +1953,36 @@ async function render_pss_channels(el){
   });
 }
 
+async function render_pss_workspace(el){
+  const meta = viewMeta['pss-workspace'] || ['Partner Workspace','Agency workspace','Airline PSS'];
+  let ws={}, stock={};
+  try{ [ws, stock] = await Promise.all([api('/api/pss/partner-workspace'), api('/api/pss/stock').catch(()=>({}))]); }
+  catch(e){ el.innerHTML = `${pageHead(esc(meta[0]), esc(meta[1]||''), '')}<div class="panel"><div class="panel-body error">${esc(e.message||String(e))}</div></div>`; return; }
+  const ctx = ws.context||{}, agency = ws.agency||{}, bookings = ws.bookings||[], checkins = ws.checkins||[];
+  const wallets = Array.isArray(stock.wallets)?stock.wallets:[], allocs = Array.isArray(stock.allocations)?stock.allocations:[];
+  const currency = wallets[0]?.currency || agency.currency || 'USD';
+  const balance = wallets.reduce((s,w)=>s+Number(w.balance||0),0);
+  const remaining = allocs.reduce((s,a)=>s+Math.max(0,Number(a.end_serial||0)-Number(a.next_serial||a.start_serial||0)+1),0);
+  const canIssue = ['agency_admin','agency_agent','admin','super_admin'].includes(ctx.role);
+  const table = (rows, cols, empty) => rows.length
+    ? `<div class="table-wrap"><table><thead><tr>${cols.map(c=>`<th>${fieldLabel(c)}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr>${cols.map(c=>`<td>${cellFor(c,r[c])}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`
+    : `<div class="empty">${esc(empty)}</div>`;
+  const bRows = bookings.map(b=>({pnr:b.pnr, passenger:b.passenger_name||'-', ticket:b.ticket_number||'-', ticket_status:b.ticket_status||'unissued', payment:b.payment_status||'-', booking:b.booking_status||'-', amount:money(b.total_amount||0,b.currency||currency),
+    action: (canIssue && b.ticket_status!=='issued' && b.booking_status!=='cancelled') ? `<button class="mini-btn primary" data-issue-booking="${esc(b.id)}">Issue ticket</button>` : (b.ticket_status==='issued'?'<span class="badge ok">Issued</span>':'-')}));
+  const aRows = allocs.map(a=>({allocation_no:a.allocation_no, range:`${a.start_serial} ? ${a.end_serial}`, remaining:Math.max(0,Number(a.end_serial||0)-Number(a.next_serial||a.start_serial||0)+1), amount:money(a.total_amount||0,a.currency||currency), status:a.status||'active'}));
+  el.innerHTML = `${pageHead(esc(meta[0]), esc((agency.name||agency.code||meta[1]||'') + (ctx.station_code?` · ${ctx.station_code}`:'')), `<button class="mini-btn secondary" data-goto="agency-wallet">Wallet</button> <button class="mini-btn primary" data-goto="pss-bookings">Bookings</button>`)}
+    <div class="grid kpi-row" style="margin-bottom:16px">${kpi('Wallet balance',money(balance,currency),'finance')}${kpi('Stock remaining',remaining,'file')}${kpi('Bookings',bookings.length,'plane')}${kpi('Check-ins',checkins.length,'users')}</div>
+    ${panel('My bookings', table(bRows,['pnr','passenger','ticket','ticket_status','payment','booking','amount','action'],'No bookings yet.'), '', 'Issue tickets from your allocated stock. Agency bookings consume only your agency allocation.')}
+    ${panel('Allocated stock', table(aRows,['allocation_no','range','remaining','amount','status'],'No stock allocated yet.'), '', 'Ask admin to allocate stock; wallet is debited at allocation time.')}
+    ${panel('Recent check-ins', table(checkins.map(c=>({checkin_no:c.checkin_no,pnr:c.pnr,passenger:c.passenger_name||'-',seat:c.seat_no||'-',status:c.status||'-',checked_in_at:c.checked_in_at||'-'})),['checkin_no','pnr','passenger','seat','status','checked_in_at'],'No check-ins yet.'), '', '')}`;
+  el.querySelectorAll('[data-goto]').forEach(btn=>{ btn.onclick = ()=> setView(btn.getAttribute('data-goto')); });
+  el.querySelectorAll('[data-issue-booking]').forEach(btn=>{ btn.onclick = async ()=>{
+    const id = btn.getAttribute('data-issue-booking'); btn.disabled = true;
+    try{ const r = await api(`/api/pss/bookings/${id}/issue-ticket`, {method:'POST'}); toast(`Ticket issued: ${r.ticket_number||'ok'}`); render_pss_workspace(el); }
+    catch(err){ toast(err.message||'Issue failed','error'); btn.disabled = false; }
+  }; });
+}
+
 async function render_agency_wallet(el){
   const meta = viewMeta['agency-wallet'] || ['Agency Wallet','Agency wallet credit, Flutterwave top-ups and stock allocations','Airline PSS'];
   let d = {}, ag = {agencies:[]};
@@ -1978,7 +2008,6 @@ async function render_agency_wallet(el){
     ${panel('Agency wallets', table(walletRows,['agency','balance','allocations','allocated_amount','status'],'No agency wallets yet.'), '', 'Wallet credit is debited when stock is allocated at a unit price.')}
     ${panel('Wallet transactions', table(txView,['tx_no','agency','type','amount','status','reference','created_at'],'No wallet transactions yet.'), '', 'Flutterwave top-ups and allocation debits.')}
     ${panel('Allocation ledger', table(allocView,['allocation_no','agency','range','amount','remaining','status'],'No allocations yet.'), '', '')}`;
-
   el.querySelectorAll('[data-goto]').forEach(btn=>{ btn.onclick = ()=> setView(btn.getAttribute('data-goto')); });
   const pendingRef = sessionStorage.getItem('walletTopupRef');
   if(pendingRef){

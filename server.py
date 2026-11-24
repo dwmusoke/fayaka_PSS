@@ -212,13 +212,13 @@ ROLE_API = {
                                '/api/setup/pss-weather', '/api/automation/run'),
     'agency_admin': ('/api/session', '/api/logout', '/api/dashboard', '/api/reports/', '/api/pss/partner-workspace',
                      '/api/pss/partner-clients', '/api/pss/partner-bookings/', '/api/pss/partner-payments/',
-                     '/api/pss/partner-users', '/api/pss/bookings', '/api/pss/flights',
+                     '/api/pss/partner-users', '/api/pss/bookings', '/api/pss/flights', '/api/pss/stock', '/api/pss/allocations', '/api/pss/wallets',
                      '/api/customers', '/api/estimates', '/api/invoices', '/api/payments',
                      '/api/finance/summary', '/api/credit-notes', '/api/tasks', '/api/notifications',
                      '/api/documents', '/api/shares', '/api/public/share/', '/api/pss/airport-info'),
     'agency_agent': ('/api/session', '/api/logout', '/api/dashboard', '/api/reports/', '/api/pss/partner-workspace',
                      '/api/pss/partner-clients', '/api/pss/partner-bookings/', '/api/pss/partner-payments/',
-                     '/api/pss/bookings', '/api/pss/flights',
+                     '/api/pss/bookings', '/api/pss/flights', '/api/pss/stock', '/api/pss/allocations', '/api/pss/wallets',
                      '/api/customers', '/api/estimates', '/api/invoices', '/api/payments',
                      '/api/finance/summary', '/api/credit-notes', '/api/tasks', '/api/notifications',
                      '/api/documents', '/api/shares', '/api/public/share/', '/api/pss/airport-info'),
@@ -953,12 +953,12 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({'error': 'Access denied for your role'}, 403)
                 if group == 'agency_agent' and method != 'GET' and not path.startswith((
                         '/api/login', '/api/logout', '/api/pss/partner-bookings/', '/api/pss/partner-payments/',
-                        '/api/pss/partner-clients/', '/api/customers', '/api/estimates', '/api/invoices',
+                        '/api/pss/partner-clients/', '/api/pss/bookings/', '/api/pss/wallets/topup', '/api/customers', '/api/estimates', '/api/invoices',
                         '/api/payments', '/api/credit-notes', '/api/tasks', '/api/notifications', '/api/documents', '/api/shares')):
                     return self._json({'error': 'Access denied for your role'}, 403)
                 if group == 'agency_admin' and method != 'GET' and not path.startswith((
                         '/api/login', '/api/logout', '/api/pss/partner-bookings/', '/api/pss/partner-payments/',
-                        '/api/pss/partner-clients/', '/api/pss/partner-users', '/api/customers', '/api/estimates',
+                        '/api/pss/partner-clients/', '/api/pss/partner-users', '/api/pss/bookings/', '/api/pss/wallets/topup', '/api/customers', '/api/estimates',
                         '/api/invoices', '/api/payments', '/api/credit-notes', '/api/tasks', '/api/notifications',
                         '/api/documents', '/api/shares')):
                     return self._json({'error': 'Access denied for your role'}, 403)
@@ -1194,7 +1194,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/api/pss/stock/allocate' and method == 'POST':
                 return self.api_pss_stock_allocate(tenant_id, user_id, sess=sess)
             if path == '/api/pss/stock/issue' and method == 'POST':
-                return self.api_pss_stock_issue(tenant_id, user_id)
+                return self.api_pss_stock_issue(tenant_id, user_id, sess=sess)
             if path == '/api/pss/wallets' and method == 'GET':
                 return self.api_pss_wallets(tenant_id, sess=sess)
             if path == '/api/pss/wallets/topup' and method == 'POST':
@@ -4291,18 +4291,30 @@ class Handler(BaseHTTPRequestHandler):
     def _psn(self, prefix):
         return f"{prefix}-{os.urandom(3).hex().upper()}"
 
-    def _pss_next_ticket(self, conn, tenant_id, channel_id=None, airport_code=None):
+    def _pss_next_ticket(self, conn, tenant_id, channel_id=None, airport_code=None, agency_id=None, strict_agency=False):
+        agency_id = self._oid(agency_id)
         allocations = q(conn, """SELECT a.*, p.prefix, p.status pool_status FROM pss_stock_allocations a
                                  JOIN pss_stock_pools p ON p.id=a.pool_id
                                  WHERE a.tenant_id=? AND a.status='active' AND p.status='active'
                                    AND a.next_serial<=a.end_serial ORDER BY a.id""", (tenant_id,))
+        scoped = [a for a in allocations if (not agency_id or a.get('agency_id') == agency_id)] if (agency_id or strict_agency) else allocations
+        if agency_id and strict_agency and not scoped:
+            return None
+        pool = scoped if agency_id else allocations
         alloc = None
         if channel_id:
-            alloc = next((a for a in allocations if a['channel_id'] == channel_id), None)
+            alloc = next((a for a in pool if a.get('channel_id') == channel_id), None)
         if not alloc and airport_code:
-            alloc = next((a for a in allocations if a['airport_code'] == airport_code), None)
+            alloc = next((a for a in pool if a.get('airport_code') == airport_code), None)
         if not alloc:
-            alloc = allocations[0] if allocations else None
+            alloc = pool[0] if pool else None
+        if not alloc and agency_id and not strict_agency:
+            # Fallback to non-agency pool only when not strict
+            for fallback in allocations:
+                if fallback.get('channel_id') == channel_id or fallback.get('airport_code') == airport_code:
+                    alloc = fallback; break
+            if not alloc:
+                alloc = allocations[0] if allocations else None
         if not alloc:
             return None
         serial = int(alloc['next_serial'])
@@ -5092,7 +5104,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({'error': 'Booking not found'}, 404)
             if row.get('ticket_status') == 'issued':
                 return self._json({'error': 'Ticket already issued'}, 400)
-            ticket = self._pss_next_ticket(conn, tenant_id, row.get('channel_id'), row.get('airport_code'))
+            ticket = self._pss_next_ticket(conn, tenant_id, row.get('channel_id'), row.get('airport_code'),
+                                           agency_id=row.get('agency_id'), strict_agency=bool(row.get('agency_id')))
             if not ticket:
                 return self._json({'error': 'No ticket stock available - allocate stock first'}, 400)
             conn.execute("UPDATE pss_bookings SET ticket_number=?, ticket_status='issued', updated_at=? WHERE id=? AND tenant_id=?",
@@ -5655,10 +5668,16 @@ class Handler(BaseHTTPRequestHandler):
             log_audit(conn, tenant_id, user_id, 'allocate_stock', 'pss_stock_pool', pid, {'quantity': qty, 'allocation_no': alloc_no, 'agency_id': agency['id'] if agency else None, 'total_amount': total_amount})
         return self._json({'ok': True, 'allocation_id': allocation_id, 'allocation_no': alloc_no, 'start_serial': start, 'end_serial': end, 'total_amount': total_amount, 'currency': currency})
 
-    def api_pss_stock_issue(self, tenant_id, user_id):
+    def api_pss_stock_issue(self, tenant_id, user_id, sess=None):
         data = read_json(self)
+        sess_agency = self._oid((sess or {}).get('agency_id'))
+        req_agency = self._oid(data.get('agency_id'))
+        if sess_agency and req_agency and req_agency != sess_agency:
+            return self._json({'error': 'Forbidden'}, 403)
+        agency_id = req_agency or sess_agency
         with db() as conn:
-            ticket = self._pss_next_ticket(conn, tenant_id, self._oid(data.get('channel_id')), data.get('airport_code'))
+            ticket = self._pss_next_ticket(conn, tenant_id, self._oid(data.get('channel_id')), data.get('airport_code'),
+                                           agency_id=agency_id, strict_agency=bool(agency_id))
             if not ticket:
                 return self._json({'error': 'No stock available'}, 400)
             log_audit(conn, tenant_id, user_id, 'issue_stock', 'pss_stock', None, {'ticket_number': ticket})
@@ -6578,7 +6597,8 @@ class Handler(BaseHTTPRequestHandler):
             conn.execute("INSERT INTO pss_bookings(" + ','.join(cols) + ") VALUES (" + ','.join(['?'] * len(cols)) + ")", vals)
             bid = q(conn, "SELECT last_insert_rowid() v", (), one=True)['v']
             self._seed_tax_lines(conn, offer['tenant_id'], bid, {'taxes': taxes, 'currency': offer.get('currency') or 'USD'})
-            ticket = self._pss_next_ticket(conn, offer['tenant_id'], channel['id'] if channel else None, offer.get('origin'))
+            ticket = self._pss_next_ticket(conn, offer['tenant_id'], channel['id'] if channel else None, offer.get('origin'),
+                                           agency_id=agency_id, strict_agency=bool(agency_id))
             if not ticket:
                 pool = q(conn, "SELECT * FROM pss_stock_pools WHERE tenant_id=? AND status='active' AND end_serial>=next_serial ORDER BY id LIMIT 1", (offer['tenant_id'],), one=True)
                 if pool:
@@ -6589,7 +6609,8 @@ class Handler(BaseHTTPRequestHandler):
                                              offer.get('origin'), end - start + 1, start, end, start,
                                              'Agency auto-allocation', now_iso(), now_iso()))
                     conn.execute("UPDATE pss_stock_pools SET next_serial=?, updated_at=? WHERE id=?", (end + 1, now_iso(), pool['id']))
-                    ticket = self._pss_next_ticket(conn, offer['tenant_id'], channel['id'] if channel else None, offer.get('origin'))
+            ticket = self._pss_next_ticket(conn, offer['tenant_id'], channel['id'] if channel else None, offer.get('origin'),
+                                           agency_id=agency_id, strict_agency=bool(agency_id))
             if ticket:
                 conn.execute("UPDATE pss_bookings SET ticket_number=?, ticket_status='issued', updated_at=? WHERE id=?", (ticket, now_iso(), bid))
             self._trace(conn, offer['tenant_id'], 'agency_direct', 'pss_booking', bid, 'booking_created',
@@ -7014,7 +7035,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({'error': 'Booking not found'}, 404)
             previous = b.get('ticket_status') or 'unissued'
             if status == 'instant' and not b.get('ticket_number'):
-                ticket = self._pss_next_ticket(conn, tenant_id, b.get('channel_id'), b.get('airport_code'))
+                ticket = self._pss_next_ticket(conn, tenant_id, b.get('channel_id'), b.get('airport_code'),
+                                               agency_id=b.get('agency_id'), strict_agency=bool(b.get('agency_id')))
                 if ticket:
                     conn.execute("UPDATE pss_bookings SET ticket_number=?, updated_at=? WHERE id=?", (ticket, now_iso(), bid))
                     b['ticket_number'] = ticket
@@ -7376,7 +7398,8 @@ class Handler(BaseHTTPRequestHandler):
         for booking in rows or []:
             if booking.get('ticket_status') == 'issued':
                 continue
-            ticket = self._pss_next_ticket(conn, tenant_id, booking.get('channel_id'), booking.get('airport_code'))
+            ticket = self._pss_next_ticket(conn, tenant_id, booking.get('channel_id'), booking.get('airport_code'),
+                                           agency_id=booking.get('agency_id'), strict_agency=bool(booking.get('agency_id')))
             if not ticket:
                 continue
             conn.execute("UPDATE pss_bookings SET ticket_number=?,ticket_status='issued',updated_at=? WHERE id=? AND tenant_id=?",
