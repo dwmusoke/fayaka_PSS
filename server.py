@@ -4763,13 +4763,20 @@ class Handler(BaseHTTPRequestHandler):
     def api_inventory_availability(self, tenant_id, qs):
         pos = (qs.get('pos') or ['ALL'])[0]
         subclass = (qs.get('subclass') or ['ALL'])[0]
+        flight_id = self._oid((qs.get('flight_id') or [''])[0])
+        segment_id = self._oid((qs.get('segment_id') or [''])[0])
         with db() as conn:
             self._inv_publish(conn, tenant_id)
-            rows = q(conn, """SELECT a.*, f.flight_no, f.origin, f.destination, f.flight_date
-                              FROM pss_inventory_availability a JOIN pss_flights f ON f.id=a.flight_id
-                              WHERE a.tenant_id=? AND (a.pos=? OR a.pos='ALL') AND (a.pos_subclass=? OR a.pos_subclass='ALL')
-                              ORDER BY f.flight_date, f.flight_no, a.pos, a.pos_subclass LIMIT 500""",
-                     (tenant_id, pos, subclass))
+            sql = """SELECT a.*, f.flight_no, f.origin, f.destination, f.flight_date
+                     FROM pss_inventory_availability a JOIN pss_flights f ON f.id=a.flight_id
+                     WHERE a.tenant_id=? AND (a.pos=? OR a.pos='ALL') AND (a.pos_subclass=? OR a.pos_subclass='ALL')"""
+            args = [tenant_id, pos, subclass]
+            if flight_id:
+                sql += " AND a.flight_id=?"; args.append(flight_id)
+            if segment_id is not None:
+                sql += " AND a.segment_id=?"; args.append(segment_id or 0)
+            sql += " ORDER BY f.flight_date, f.flight_no, a.segment_id, a.pos, a.pos_subclass LIMIT 500"
+            rows = q(conn, sql, args)
         return self._json({'availability': rows, 'pos': pos, 'subclass': subclass,
                            'poll_key': max([str(r.get('published_at') or '') for r in rows] or [''])})
 
@@ -5033,12 +5040,13 @@ class Handler(BaseHTTPRequestHandler):
     def api_inventory_help(self):
         return self._json({'articles': [
             {'title': 'Flight date inventory', 'body': 'Open Flight Inventory, choose a flight date tab, then inspect legs, segments, reservation impact and capacity.'},
-            {'title': 'Leg and Segment controls', 'body': 'Use Legs and Segments tabs to add, edit or delete itinerary structure. Segment seats drive availability capacity.'},
-            {'title': 'Availability and POS', 'body': 'Choose Point of Sale and subclass, then Publish availability. The screen polls every 15 seconds for the latest published version.'},
-            {'title': 'Business rules and TIA', 'body': 'Rules support limit, gate and pos_subclass logic. TIA applies a temporary inventory adjustment percentage.'},
-            {'title': 'Overbooking', 'body': 'The Overbooking tab lists flights where committed reservations exceed capacity. Resolve raises capacity and closes the queue item.'},
+            {'title': 'Leg and Segment controls', 'body': 'Use Legs and Segments tabs to add, edit or delete itinerary structure. Segment-level availability is published per segment; rule scope can target flight/date/segment.'},
+            {'title': 'Availability and POS', 'body': 'Choose Point of Sale and subclass, then Publish availability. Availability is calculated as capacity-committed with Segment limit, Gating, POS subclass logic, TIA and nesting adjustments. Screen polls every 15 seconds.'},
+            {'title': 'Business rules and TIA', 'body': 'Rules support Segment limit, Gating, POS subclass logic, Hold expiry. Scope by flight/date/segment, POS/subclass, nesting (serial/parallel/mixed), priority, and TIA % adjustment.'},
+            {'title': 'Overbooking', 'body': 'Overbooking tab lists flights where committed reservations exceed capacity. Resolve raises capacity and closes the queue item; use history/queue for audit.'},
             {'title': 'Uncommitted bookings', 'body': 'Holds expire automatically when accessed after expiry. Confirm converts a hold to a reservation; release restores one seat.'},
-            {'title': 'Self-service support', 'body': 'Use this Help tab first. If an action fails, copy the error path shown in the toast and search the README or ask your administrator.'}
+            {'title': 'Market data & valuation', 'body': 'Market data snapshots internal route/date demand and average fare. Active valuation computes load-factor value; manual valuations can be stored as active.'},
+            {'title': 'Self-service support', 'body': 'Use this Help tab first. If an action fails, copy the error/toast and check README/DEPLOYMENT.md or contact your administrator.'}
         ]})
 
     def api_pss_bookings(self, tenant_id, method, bid=None, user_id=None, sess=None):
