@@ -5,8 +5,17 @@ import re
 import secrets
 import sqlite3
 import sys
+import time
 from contextlib import contextmanager
 from datetime import datetime, date
+
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+    from psycopg.pool import ThreadedConnectionPool
+except Exception:
+    psycopg = None
+    ThreadedConnectionPool = None
 
 DB_PATH = os.environ.get("TRAVEL_ERP_DB", os.path.join(os.path.dirname(__file__), "data", "erp.db"))
 _raw_db_url = (os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL") or "").strip()
@@ -19,6 +28,17 @@ if _raw_db_url and "sslmode=" not in _raw_db_url and ("supabase.co" in _raw_db_u
 DATABASE_URL = _raw_db_url
 USING_POSTGRES = DATABASE_URL.startswith("postgresql://")
 REQUIRE_POSTGRES = (os.environ.get("REQUIRE_POSTGRES") or "").strip().lower() in ("1", "true", "yes", "on") or bool(os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("RAILWAY_PROJECT_ID"))
+
+PG_POOL = None
+
+
+def _init_pg_pool():
+    global PG_POOL
+    if USING_POSTGRES and ThreadedConnectionPool is not None and PG_POOL is None:
+        try:
+            PG_POOL = ThreadedConnectionPool(minconn=2, maxconn=20, conninfo=DATABASE_URL)
+        except Exception:
+            PG_POOL = None
 
 
 def now_iso():
@@ -238,11 +258,13 @@ class _SQLiteConn:
 
 def get_conn():
     if USING_POSTGRES:
-        try:
-            import psycopg
-            from psycopg.rows import dict_row
-        except Exception as e:
-            raise RuntimeError("DATABASE_URL is set but psycopg is not installed. Run: pip install -r requirements.txt") from e
+        _init_pg_pool()
+        if PG_POOL is not None:
+            try:
+                conn = PG_POOL.getconn()
+                return _PGConn(conn)
+            except Exception:
+                PG_POOL = None
         conn = psycopg.connect(DATABASE_URL, autocommit=False, row_factory=dict_row)
         return _PGConn(conn)
     if REQUIRE_POSTGRES:
@@ -2003,9 +2025,51 @@ CREATE INDEX IF NOT EXISTS idx_pss_docs_airport ON pss_airport_docs(tenant_id, a
 CREATE INDEX IF NOT EXISTS idx_pss_weather_airport ON pss_weather(tenant_id, airport_code);
 CREATE INDEX IF NOT EXISTS idx_pss_cases_status ON pss_service_cases(tenant_id, status);
 
+CREATE TABLE IF NOT EXISTS sessions (
+  id TEXT PRIMARY KEY,
+  tenant_id INTEGER NOT NULL,
+  user_id INTEGER NOT NULL,
+  data TEXT NOT NULL,
+  expires_at REAL NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_tenant_user ON sessions(tenant_id, user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+
+
 
 """
 
+SEED_RUN_KEY = "seed_ran"
+
+
+def db_set_session(conn, sid, tenant_id, user_id, data, expires_at, created_at, updated_at):
+    conn.execute(
+        """INSERT INTO sessions(id, tenant_id, user_id, data, expires_at, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?)
+           ON CONFLICT(id) DO UPDATE SET tenant_id=EXCLUDED.tenant_id, user_id=EXCLUDED.user_id,
+             data=EXCLUDED.data, expires_at=EXCLUDED.expires_at, created_at=EXCLUDED.created_at,
+             updated_at=EXCLUDED.updated_at""",
+        (sid, tenant_id, user_id, data, expires_at, created_at, updated_at),
+    )
+
+
+def db_get_session(conn, sid):
+    row = q(conn, "SELECT * FROM sessions WHERE id=? AND expires_at > ?", (sid, time.time()), one=True)
+    return row
+
+
+def db_delete_session(conn, sid):
+    conn.execute("DELETE FROM sessions WHERE id=?", (sid,))
+
+
+def db_delete_user_sessions(conn, user_id):
+    conn.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+
+
+def db_cleanup_expired_sessions(conn):
+    conn.execute("DELETE FROM sessions WHERE expires_at <= ?", (time.time(),))
 
 
 def init_db():
@@ -2017,11 +2081,17 @@ def init_db():
         ensure_travelers(conn)
         ensure_pss(conn)
         ensure_erp_pss_link(conn)
-        seed(conn)
-        seed_accounting(conn)
-        seed_setup(conn)
-        seed_pss(conn)
-        _bootstrap_admin_password(conn)
+        already = q(conn, "SELECT 1 FROM preferences WHERE key=? LIMIT 1", (SEED_RUN_KEY,), one=True)
+        if not already:
+            seed(conn)
+            seed_accounting(conn)
+            seed_setup(conn)
+            seed_pss(conn)
+            _bootstrap_admin_password(conn)
+            conn.execute("INSERT INTO preferences(key, value, created_at, updated_at) VALUES (?,?,?,?)",
+                         (SEED_RUN_KEY, '1', now_iso(), now_iso()))
+        else:
+            _bootstrap_admin_password(conn)
 
 
 def _add_columns(conn, table, cols):

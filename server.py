@@ -8,6 +8,7 @@ import mimetypes
 import os
 import re
 import secrets
+import signal
 import smtplib
 import ssl
 import sys
@@ -25,7 +26,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime, timedelta, date
 
-from db import init_db, db, q, now_iso, log_audit, get_conn, seed_pss, USING_POSTGRES
+from db import init_db, db, q, now_iso, log_audit, get_conn, seed_pss, USING_POSTGRES, REQUIRE_POSTGRES, db_set_session, db_get_session, db_delete_session, db_delete_user_sessions
 from ingest import scan_and_import_air
 from air_parser import parse_air_text
 from documents import build_pdf, branding_from_row
@@ -356,9 +357,15 @@ LOGIN_LOCKOUT_SECONDS = int(os.environ.get('LOGIN_LOCKOUT_SECONDS', '900'))
 LOGIN_LOCKOUT_ENABLED = os.environ.get('LOGIN_LOCKOUT_DISABLED', '').lower() not in ('1', 'true', 'yes') and LOGIN_LOCKOUT_MAX > 0
 MAX_BODY = int(os.environ.get('MAX_BODY_MB', '10')) * 1024 * 1024
 PORT = int(os.environ.get('PORT', 8000))
-SECRET_KEY = os.environ.get('SECRET_KEY', 'dev-change-me-in-prod')
+SECRET_KEY = os.environ.get('SECRET_KEY')
+if not SECRET_KEY and REQUIRE_POSTGRES:
+    raise RuntimeError("SECRET_KEY is required in production (Railway). Set SECRET_KEY env variable.")
+if not SECRET_KEY:
+    SECRET_KEY = 'dev-change-me-in-prod'
 DEFAULT_TENANT = os.environ.get('DEFAULT_TENANT', 'fayaka')
-API_BASE = os.environ.get('API_BASE', '/app')
+API_BASE = os.environ.get('API_BASE', '')
+if REQUIRE_POSTGRES and not API_BASE:
+    API_BASE = ''
 
 
 def _use_secure_cookie(handler):
@@ -483,12 +490,43 @@ def _session_expiry(days=90):
 def _invalidate_user_sessions(user_id):
     if not user_id:
         return
+    if USING_POSTGRES:
+        try:
+            with db() as conn:
+                db_delete_user_sessions(conn, user_id)
+        except Exception:
+            pass
+        return
     with SESS_LOCK:
         for sid in [t for t, s in SESSIONS.items() if s.get('user_id') == user_id]:
             SESSIONS.pop(sid, None)
 
 
 def get_session(handler):
+    if USING_POSTGRES:
+        try:
+            cookie = SimpleCookie(handler.headers.get('Cookie'))
+        except Exception:
+            return None
+        if 'sid' not in cookie:
+            return None
+        sid = cookie['sid'].value
+        now = time.time()
+        with db() as conn:
+            row = db_get_session(conn, sid)
+            if not row:
+                return None
+            import json as _json
+            sess = _json.loads(row['data']) if isinstance(row['data'], str) else dict(row)
+            if sess.get('client_hash') and sess['client_hash'] != _client_hash(handler):
+                db_delete_session(conn, sid)
+                return None
+            sess['last_activity'] = now
+            db_set_session(conn, sid, sess.get('tenant_id'), sess.get('user_id'),
+                           _json.dumps(sess), sess.get('expires_at', now + SESSION_TTL),
+                           sess.get('created_at', now_iso()), now_iso())
+            return sess
+        return None
     try:
         cookie = SimpleCookie(handler.headers.get('Cookie'))
     except Exception:
@@ -711,7 +749,30 @@ class Handler(BaseHTTPRequestHandler):
 
     def _json(self, obj, status=200, headers=None):
         b, st, ct = json_bytes(obj, status)
-        self._send(b, st, ct, headers=headers)
+        h = dict(headers or {})
+        origin = self.headers.get('Origin')
+        allow_origin = os.environ.get('CORS_ALLOW_ORIGIN')
+        if not allow_origin and not REQUIRE_POSTGRES:
+            allow_origin = '*'
+        if allow_origin:
+            h['Access-Control-Allow-Origin'] = origin if allow_origin == '*' and origin else allow_origin
+            h['Access-Control-Allow-Headers'] = 'Content-Type, X-CSRF-Token, Authorization'
+            h['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+            h['Access-Control-Allow-Credentials'] = 'true'
+        self._send(b, st, ct, headers=h)
+
+    def do_OPTIONS(self):
+        origin = self.headers.get('Origin')
+        allow_origin = os.environ.get('CORS_ALLOW_ORIGIN')
+        if not allow_origin and not REQUIRE_POSTGRES:
+            allow_origin = '*'
+        h = {}
+        if allow_origin:
+            h['Access-Control-Allow-Origin'] = origin if allow_origin == '*' and origin else allow_origin
+            h['Access-Control-Allow-Headers'] = 'Content-Type, X-CSRF-Token, Authorization'
+            h['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+            h['Access-Control-Allow-Credentials'] = 'true'
+        self._send(b'', 204, '', headers=h)
 
     def _serve_static(self, path):
         if path == '/':
@@ -1446,8 +1507,13 @@ class Handler(BaseHTTPRequestHandler):
                 'agency_id': u.get('agency_id'), 'station_code': u.get('station_code'), 'branch_id': u.get('branch_id'),
                 'client_hash': _client_hash(self), 'issued_at': now, 'last_activity': now,
                 'expires_at': now + SESSION_TTL}
-        with SESS_LOCK:
-            SESSIONS[token] = sess
+        if USING_POSTGRES:
+            import json as _json
+            db_set_session(conn, token, t['id'], u['id'], _json.dumps(sess), now + SESSION_TTL,
+                           now_iso(), now_iso())
+        else:
+            with SESS_LOCK:
+                SESSIONS[token] = sess
         flags = '; Secure' if _use_secure_cookie(self) else ''
         headers = {'Set-Cookie': f'sid={token}; Path=/; HttpOnly; SameSite=Strict{flags}'}
         return self._json({'ok': True, 'session': sess}, 200, headers=headers)
@@ -1478,8 +1544,15 @@ class Handler(BaseHTTPRequestHandler):
         cookie = SimpleCookie(self.headers.get('Cookie'))
         sid = cookie['sid'].value if 'sid' in cookie else None
         if sid:
-            with SESS_LOCK:
-                SESSIONS.pop(sid, None)
+            if USING_POSTGRES:
+                try:
+                    with db() as conn:
+                        db_delete_session(conn, sid)
+                except Exception:
+                    pass
+            else:
+                with SESS_LOCK:
+                    SESSIONS.pop(sid, None)
         flags = '; Secure' if _use_secure_cookie(self) else ''
         headers = {'Set-Cookie': f'sid=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax{flags}'}
         return self._json({'ok': True}, 200, headers=headers)
@@ -8160,6 +8233,16 @@ def run():
         print("Session cookies use the Secure flag (set SECURE_COOKIES=0 for plain-http internal use)")
     elif _SECURE_COOKIES_ENV is None:
         print("Session cookies: Secure auto-detected (loopback plain HTTP allowed; set SECURE_COOKIES=1 to force)")
+    _shutdown = {'flag': False}
+
+    def _handle_sigterm(signum, frame):
+        _shutdown['flag'] = True
+        try:
+            httpd.shutdown()
+        except Exception:
+            pass
+
+    signal.signal(signal.SIGTERM, _handle_sigterm)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
