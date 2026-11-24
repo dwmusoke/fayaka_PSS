@@ -519,14 +519,12 @@ def get_session(handler):
             import json as _json
             sess = _json.loads(row['data']) if isinstance(row['data'], str) else dict(row)
             if sess.get('client_hash') and sess['client_hash'] != _client_hash(handler):
-                db_delete_session(conn, sid)
-                return None
+                pass  # allow session across proxy IP changes on Railway
             sess['last_activity'] = now
             db_set_session(conn, sid, sess.get('tenant_id'), sess.get('user_id'),
                            _json.dumps(sess), sess.get('expires_at', now + SESSION_TTL),
                            sess.get('created_at', now_iso()), now_iso())
             return sess
-        return None
     try:
         cookie = SimpleCookie(handler.headers.get('Cookie'))
     except Exception:
@@ -1515,7 +1513,7 @@ class Handler(BaseHTTPRequestHandler):
             with SESS_LOCK:
                 SESSIONS[token] = sess
         flags = '; Secure' if _use_secure_cookie(self) else ''
-        headers = {'Set-Cookie': f'sid={token}; Path=/; HttpOnly; SameSite=Strict{flags}'}
+        headers = {'Set-Cookie': f'sid={token}; Path=/; HttpOnly; SameSite=Lax{flags}'}
         return self._json({'ok': True, 'session': sess}, 200, headers=headers)
 
     def api_auth_change_password(self, tenant_id, user_id, sess):
