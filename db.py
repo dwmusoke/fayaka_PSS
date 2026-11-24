@@ -2662,7 +2662,11 @@ def ensure_pss(conn):
                           ('service_fee', 'REAL DEFAULT 0'), ('issue_date', 'TEXT'), ('issued_by', 'TEXT'),
                            ('baggage_allowance_kg', 'REAL DEFAULT 23'), ('hold_expires_at', 'TEXT')]),
         ('pss_payments', [('trace_id', 'TEXT'), ('booking_source', "TEXT DEFAULT 'counter'")]),
-        ('pss_flights', [('base_fare_reference', 'REAL'), ('fare_optimized_at', 'TEXT')]),
+        ('pss_flights', [('base_fare_reference', 'REAL'), ('fare_optimized_at', 'TEXT'),
+                         ('fare_basis', 'TEXT'), ('fare_terms', 'TEXT'), ('cabin_class', "TEXT DEFAULT 'Y'"),
+                         ('baggage_allowance', 'TEXT'), ('change_fee', 'REAL DEFAULT 0'), ('refund_fee', 'REAL DEFAULT 0'),
+                         ('min_stay', 'TEXT'), ('max_stay', 'TEXT'), ('advance_purchase_days', 'INTEGER DEFAULT 0'),
+                         ('schedule_group', 'TEXT'), ('frequency', "TEXT DEFAULT 'once'")]),
         ('pss_stock_allocations', [('agency_id', 'INTEGER'), ('unit_price', 'REAL DEFAULT 0'), ('total_amount', 'REAL DEFAULT 0'),
                                    ('currency', "TEXT DEFAULT 'USD'"), ('wallet_tx_id', 'INTEGER')]),
     ]:

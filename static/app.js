@@ -528,6 +528,16 @@ const CREATE_SCHEMAS = {
     sel('role',['agency','station','checkin'],false,'agency'),sel('status',STATUS_ACTIVE,false,'active'),
     num('agency_id'),txt('station_code'),num('branch_id')
   ]},
+  'pss-flights':{fields:[
+    txt('flight_no',true),txt('origin',true),txt('destination',true),
+    dat('flight_date',true,()=>today()),txt('dep_time'),txt('arr_time'),txt('aircraft'),
+    num('total_seats'),num('available_seats'),num('base_fare'),sel('currency',CURRENCIES,false,'USD'),
+    txt('gate'),txt('terminal'),sel('status',['scheduled','delayed','cancelled','completed','boarding'],false,'scheduled'),
+    txt('cabin_class'),txt('fare_basis'),area('fare_terms'),
+    txt('baggage_allowance'),num('change_fee'),num('refund_fee'),txt('min_stay'),txt('max_stay'),num('advance_purchase_days'),
+    txt('schedule_group'),sel('frequency',['once','daily','weekly','weekdays','weekends','custom'],false,'once'),
+    area('repeat_dates','Repeat dates (comma/space separated YYYY-MM-DD, for same-time extra flights)')
+  ]},
   'pss-charter-flights':{fields:[
     txt('charter_no',true),num('request_id'),txt('flight_no',true),txt('origin',true),txt('destination',true),
     dat('flight_date',true,()=>today()),txt('dep_time'),txt('arr_time'),txt('aircraft'),num('seats'),

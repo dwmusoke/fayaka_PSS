@@ -4369,7 +4369,8 @@ class Handler(BaseHTTPRequestHandler):
             if data.get('status') == 'cancelled':
                 conn.execute("UPDATE pss_flights SET status='cancelled', updated_at=? WHERE id=? AND tenant_id=?", (now_iso(), fid, tenant_id))
                 return self._json({'ok': True})
-            fields = ['flight_no','origin','destination','flight_date','dep_time','arr_time','aircraft','total_seats','available_seats','base_fare','currency','gate','terminal','status']
+            fields = ['flight_no','origin','destination','flight_date','dep_time','arr_time','aircraft','total_seats','available_seats','base_fare','currency','gate','terminal','status',
+                      'fare_basis','fare_terms','cabin_class','baggage_allowance','change_fee','refund_fee','min_stay','max_stay','advance_purchase_days','schedule_group','frequency']
             total_seats = int(data.get('total_seats') or 0)
             available_seats = int(data.get('available_seats') or 0)
             if available_seats < 0 or available_seats > total_seats:
@@ -4379,16 +4380,31 @@ class Handler(BaseHTTPRequestHandler):
                 if total_seats < committed:
                     return self._json({'error': f'total_seats cannot be below {committed} active reservation(s)'}, 400)
             vals = [data.get(f) for f in fields]
+            repeat_dates = data.get('repeat_dates') or []
+            if isinstance(repeat_dates, str):
+                repeat_dates = [d.strip() for d in repeat_dates.replace(',', ' ').split() if d.strip()]
+            save_dates = [data.get('flight_date')] + [d for d in repeat_dates if d and d != data.get('flight_date')]
+            created_ids = []
             if fid:
                 conn.execute("UPDATE pss_flights SET " + ','.join(f + '=?' for f in fields) + ",updated_at=? WHERE id=? AND tenant_id=?", vals + [now_iso(), fid, tenant_id])
+                created_ids.append(fid)
             else:
                 if not data.get('flight_no') or not data.get('origin') or not data.get('destination') or not data.get('flight_date'):
                     return self._json({'error': 'flight_no, origin, destination and flight_date are required'}, 400)
-                vals = [tenant_id] + vals + [now_iso(), now_iso()]
-                cur = conn.execute("INSERT INTO pss_flights(tenant_id," + ','.join(fields) + ",created_at,updated_at) VALUES (" + ','.join(['?'] * (len(fields) + 3)) + ")", vals)
-                fid = cur.lastrowid
-            log_audit(conn, tenant_id, None, 'save', 'pss_flight', fid, {})
-        return self._json({'ok': True, 'flight_id': fid})
+                for fd in save_dates:
+                    row_vals = [tenant_id] + [fd if f == 'flight_date' else data.get(f) for f in fields] + [now_iso(), now_iso()]
+                    try:
+                        cur = conn.execute("INSERT INTO pss_flights(tenant_id," + ','.join(fields) + ",created_at,updated_at) VALUES (" + ','.join(['?'] * (len(fields) + 3)) + ")", row_vals)
+                        created_ids.append(cur.lastrowid)
+                    except Exception as e:
+                        if 'UNIQUE' in str(e).upper() or 'unique' in str(e).lower():
+                            continue
+                        raise
+                if not created_ids:
+                    return self._json({'error': 'No flights created. Check for duplicate flight_no+date or invalid data.'}, 400)
+                fid = created_ids[0]
+            log_audit(conn, tenant_id, None, 'save', 'pss_flight', fid, {'created': len(created_ids)})
+        return self._json({'ok': True, 'flight_id': fid, 'flight_ids': created_ids, 'created': len(created_ids)})
 
     def api_pss_seat_holds(self, tenant_id):
         with db() as conn:
