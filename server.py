@@ -5044,7 +5044,8 @@ class Handler(BaseHTTPRequestHandler):
             if method == 'PUT':
                 fields = ['passenger_name','passenger_type','contact_email','contact_phone','fare_class','fare_amount','taxes',
                           'total_amount','booking_status','payment_status','ticket_status','seat_no','airport_code','channel_id',
-                          'fare_basis','service_fee','commission','baggage_allowance_kg','doc_no','issue_date','issued_by','currency']
+                          'fare_basis','service_fee','commission','baggage_allowance_kg','doc_no','issue_date','issued_by','currency',
+                          'dob','gender','nationality','passport_no','passport_expiry','passport_country','title','segments_json','ssr_codes','special_requests']
                 vals = []
                 for f in fields:
                     v = data.get(f)
@@ -5075,11 +5076,14 @@ class Handler(BaseHTTPRequestHandler):
             total = float(data.get('total_amount') or (fare + taxes))
             pnr = (data.get('pnr') or self._psn('')).upper().replace('-', '')[:6]
             cur = data.get('currency') or flight.get('currency') or 'USD'
-            conn.execute("""INSERT INTO pss_bookings(tenant_id,pnr,flight_id,passenger_name,passenger_type,contact_email,contact_phone,channel_id,airport_code,fare_class,fare_amount,taxes,total_amount,currency,ticket_status,payment_status,booking_status,created_by,created_at,updated_at)
-                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'unissued','pending','confirmed',?,?,?)""",
+            conn.execute("""INSERT INTO pss_bookings(tenant_id,pnr,flight_id,passenger_name,passenger_type,contact_email,contact_phone,channel_id,airport_code,fare_class,fare_amount,taxes,total_amount,currency,ticket_status,payment_status,booking_status,created_by,created_at,updated_at,dob,gender,nationality,passport_no,passport_expiry,passport_country,title,segments_json,ssr_codes,special_requests)
+                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'unissued','pending','confirmed',?,?,?, ?,?,?,?,?,?,?,?,?,?)""",
                          (tenant_id, pnr, fid, name, data.get('passenger_type') or 'ADT', data.get('contact_email'),
                           data.get('contact_phone'), self._oid(data.get('channel_id')), data.get('airport_code') or flight.get('origin'),
-                          data.get('fare_class') or 'Y', fare, taxes, total, cur, user_id, now_iso(), now_iso()))
+                          data.get('fare_class') or 'Y', fare, taxes, total, cur, user_id, now_iso(), now_iso(),
+                          data.get('dob'), data.get('gender'), data.get('nationality'), data.get('passport_no'),
+                          data.get('passport_expiry'), data.get('passport_country'), data.get('title'),
+                          data.get('segments_json'), data.get('ssr_codes'), data.get('special_requests')))
             bid = q(conn, "SELECT last_insert_rowid() v", (), one=True)['v']
             self._seed_tax_lines(conn, tenant_id, bid, {'taxes': taxes, 'currency': cur})
             trace_id = self._new_trace_id()

@@ -538,6 +538,20 @@ const CREATE_SCHEMAS = {
     txt('schedule_group'),sel('frequency',['once','daily','weekly','weekdays','weekends','custom'],false,'once'),
     area('repeat_dates','Repeat dates (comma/space separated YYYY-MM-DD, for same-time extra flights)')
   ]},
+  'pss-bookings':{fields:[
+    num('flight_id',true),txt('passenger_name',true),sel('passenger_type',['ADT','CHD','INF'],false,'ADT'),sel('title',['Mr','Ms','Mrs','Mstr','Miss','Dr'],false,''),
+    dat('dob'),sel('gender',['M','F','X'],false,''),txt('nationality'),
+    txt('passport_no'),dat('passport_expiry'),txt('passport_country'),txt('doc_no'),
+    txt('contact_email'),txt('contact_phone'),
+    txt('fare_class'),num('fare_amount'),num('taxes'),num('total_amount'),sel('currency',CURRENCIES,false,'USD'),
+    num('channel_id'),txt('airport_code'),txt('seat_no'),txt('fare_basis'),
+    num('service_fee'),num('commission'),num('baggage_allowance_kg'),
+    sel('booking_status',['confirmed','hold','cancelled','completed'],false,'confirmed'),
+    sel('payment_status',['pending','partial','paid','refunded'],false,'pending'),
+    sel('ticket_status',['unissued','issued','void','refunded','exchanged'],false,'unissued'),
+    txt('ssr_codes'),area('special_requests'),
+    area('segments_json','Segments JSON (optional: [{"origin":"EBB","destination":"NBO","flight_no":"FA402","date":"2026-12-01","dep_time":"08:00","arr_time":"10:00"}])')
+  ]},
   'pss-charter-flights':{fields:[
     txt('charter_no',true),num('request_id'),txt('flight_no',true),txt('origin',true),txt('destination',true),
     dat('flight_date',true,()=>today()),txt('dep_time'),txt('arr_time'),txt('aircraft'),num('seats'),
