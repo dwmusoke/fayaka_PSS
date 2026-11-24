@@ -6,6 +6,7 @@ import io
 import json
 import mimetypes
 import os
+import re
 import secrets
 import smtplib
 import ssl
@@ -17,13 +18,14 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import zipfile
 from email.message import EmailMessage
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 
-from db import init_db, db, q, now_iso, log_audit, get_conn
+from db import init_db, db, q, now_iso, log_audit, get_conn, seed_pss
 from ingest import scan_and_import_air
 from air_parser import parse_air_text
 from documents import build_pdf, branding_from_row
@@ -39,6 +41,136 @@ def json_bytes(obj, status=200):
     b = json.dumps(obj, default=str).encode('utf-8')
     return b, status, 'application/json; charset=utf-8'
 
+
+REPORT_SOURCES = {
+    'pss-bookings': 'pss_bookings', 'pss-flights': 'pss_flights', 'flight-inventory': 'pss_inventory_legs',
+    'pss-stock': 'pss_stock_pools', 'pss-checkins': 'pss_checkins', 'pss-payments': 'pss_payments',
+    'payments': 'payments', 'travelers': 'travelers', 'orders': 'orders', 'crm': 'customers',
+    'invoicing': 'invoices', 'estimates': 'estimates', 'credit-notes': 'credit_notes',
+    'bills': 'bills', 'expenses': 'expenses', 'journals': 'journals', 'documents': 'documents',
+    'shares': 'document_shares', 'notifications': 'notifications', 'refunds': 'refunds',
+    'coupons': 'coupons', 'vouchers': 'vouchers', 'bank-accounts': 'bank_accounts',
+    'bank-transactions': 'bank_transactions', 'reconciliations': 'reconciliations',
+    'pss-agencies': 'pss_agencies', 'pss-ancillaries': 'pss_ancillaries',
+    'pss-ancillary-sales': 'pss_ancillary_sales', 'pss-charters': 'pss_charter_requests',
+    'pss-charter-flights': 'pss_charter_flights', 'pss-trace': 'pss_trace',
+    'pss-direct': 'pss_eticket_directs', 'pss-eticket-tracker': 'pss_bookings',
+    'pss-ticket-status': 'pss_bookings', 'pss-aftersales': 'pss_service_cases',
+    'pss-airports': 'pss_airports', 'pss-baggage': 'pss_baggage_rules',
+    'pss-airport-docs': 'pss_airport_docs', 'pss-weather': 'pss_weather',
+    'pss-branches': 'branches', 'pss-workspace': 'pss_agencies', 'pss-partner-users': 'users',
+    'partners': 'partners', 'suppliers': 'contacts', 'setup-contacts': 'contacts',
+    'sources': 'connectors', 'backoffice': 'tasks', 'tasks': 'tasks', 'setup-users': 'users',
+    'setup-chart': 'chart_of_accounts', 'setup-products': 'products', 'setup-currencies': 'currencies',
+    'setup-rules': 'business_rules', 'setup-preferences': 'preferences', 'setup-mail': 'mail_templates',
+    'setup-integrations': 'integrations', 'loyalty': 'portal_customers', 'partner-reports': 'pss_agencies'
+}
+REPORT_EXCLUDE_COLUMNS = {'password', 'password_hash', 'file_data', 'raw_payload', 'payload', 'token',
+                          'secret', 'api_key', 'webhook_secret', 'session_id', 'csrf', 'access_token',
+                          'refresh_token', 'private_key', 'login_token', 'config_json', 'raw_json',
+                          'secret_key', 'signature_secret', 'password_reset_token', 'remember_token'}
+
+REPORT_ACCOUNTING = {'payments', 'invoicing', 'credit-notes', 'bills', 'expenses', 'journals', 'refunds',
+                     'coupons', 'vouchers', 'bank-accounts', 'bank-transactions', 'reconciliations',
+                     'loyalty', 'documents', 'shares', 'notifications', 'setup-chart'}
+REPORT_AGENCY = {'pss-bookings', 'pss-flights', 'flight-inventory', 'pss-checkins', 'pss-payments',
+                 'payments', 'orders', 'crm', 'invoicing', 'estimates', 'credit-notes', 'documents',
+                 'tasks', 'notifications', 'shares', 'partner-reports', 'pss-agencies', 'pss-trace',
+                 'pss-ancillaries', 'pss-charter-flights', 'pss-direct', 'pss-eticket-tracker'}
+REPORT_RESTRICTED = {'setup-users', 'pss-partner-users', 'sources', 'setup-integrations', 'setup-mail',
+                     'setup-rules', 'setup-preferences', 'admin', 'developer', 'onboarding'}
+
+
+def _report_allowed(entity, group):
+    if group == 'airline_admin':
+        return True
+    if group == 'airline_accountant':
+        return entity in REPORT_ACCOUNTING
+    if group in ('airline_reservations', 'airline_operations'):
+        return entity not in REPORT_RESTRICTED
+    if group in ('agency_admin', 'agency_agent'):
+        return entity in REPORT_AGENCY
+    return False
+
+
+def _report_value(v):
+    if v is None or isinstance(v, (bytes, bytearray)):
+        return ''
+    if isinstance(v, (dict, list, tuple)):
+        return json.dumps(v, default=str)
+    return v
+
+
+def _report_label(c):
+    return str(c).replace('_', ' ').strip().title()
+
+
+def _xml_text(v):
+    s = ''.join(ch for ch in str(v) if ch in '\t\n\r' or ord(ch) >= 32)
+    return (s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            .replace('"', '&quot;').replace("'", '&apos;'))
+
+
+def _xlsx_column(i):
+    s = ''
+    while i > 0:
+        i, r = divmod(i - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
+def _build_xlsx(headers, rows):
+    def row_xml(values, number):
+        cells = [f'<row r="{number}">']
+        for i, v in enumerate(values, 1):
+            if v is None or isinstance(v, (bytes, bytearray)):
+                continue
+            ref = f'{_xlsx_column(i)}{number}'
+            if isinstance(v, bool):
+                cells.append(f'<c r="{ref}" t="inlineStr"><is><t>{_xml_text(str(v))}</t></is></c>')
+            elif isinstance(v, (int, float)):
+                if isinstance(v, float) and (v != v or v == float('inf') or v == float('-inf')):
+                    v = str(v)
+                    cells.append(f'<c r="{ref}" t="inlineStr"><is><t>{_xml_text(v)}</t></is></c>')
+                else:
+                    cells.append(f'<c r="{ref}"><v>{v}</v></c>')
+            else:
+                cells.append(f'<c r="{ref}" t="inlineStr"><is><t xml:space="preserve">{_xml_text(v)}</t></is></c>')
+        cells.append('</row>')
+        return ''.join(cells)
+    sheet = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+             '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>',
+             row_xml(headers, 1)]
+    for idx, row in enumerate(rows, 2):
+        sheet.append(row_xml(row, idx))
+    sheet.append('</sheetData></worksheet>')
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+        z.writestr('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                   '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                   '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+                   '<Default Extension="xml" ContentType="application/xml"/>'
+                   '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+                   '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+                   '</Types>')
+        z.writestr('_rels/.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                   '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                   '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+                   '</Relationships>')
+        z.writestr('xl/workbook.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                   '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+                   '<sheets><sheet name="Report" sheetId="1" r:id="rId1"/></sheets></workbook>')
+        z.writestr('xl/_rels/workbook.xml.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                   '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                   '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+                   '</Relationships>')
+        z.writestr('xl/worksheets/sheet1.xml', ''.join(sheet))
+    return buf.getvalue()
+
+
+
+USER_ROLES = ('owner','admin','accountant','reservations','agent','operations','checkin','station',
+              'agency_admin','agency_agent','agency')
 
 
 def role_group(role):
@@ -60,23 +192,30 @@ def role_group(role):
 
 ROLE_API = {
     'airline_admin': None,
-    'airline_accountant': ('/api/dashboard', '/api/analytics', '/api/finance/', '/api/invoices',
-                           '/api/credit-notes', '/api/payments', '/api/bills', '/api/expenses',
-                           '/api/setup/chart-of-accounts', '/api/documents', '/api/shares',
-                           '/api/tasks', '/api/notifications', '/api/session', '/api/logout'),
-    'airline_reservations': ('/api/dashboard', '/api/analytics', '/api/global-search', '/api/orders',
-                             '/api/customers', '/api/travelers', '/api/pss/', '/api/documents',
+    'airline_accountant': ('/api/dashboard', '/api/analytics', '/api/revenue/', '/api/reports/', '/api/finance/', '/api/invoices',
+                            '/api/credit-notes', '/api/payments', '/api/bills', '/api/expenses', '/api/loyalty/',
+                             '/api/setup/chart-of-accounts', '/api/setup/refunds', '/api/setup/coupons',
+                            '/api/setup/vouchers', '/api/setup/bank-accounts', '/api/setup/bank-transactions',
+                            '/api/setup/reconciliations', '/api/setup/unused-tickets',
+                             '/api/setup/fare-optimization', '/api/automation/run', '/api/documents',
                              '/api/shares', '/api/tasks', '/api/notifications', '/api/session', '/api/logout'),
-    'airline_operations': ('/api/dashboard', '/api/analytics', '/api/global-search', '/api/pss/',
-                           '/api/orders', '/api/travelers', '/api/tasks', '/api/notifications',
-                           '/api/documents', '/api/session', '/api/logout'),
-    'agency_admin': ('/api/session', '/api/logout', '/api/dashboard', '/api/pss/partner-workspace',
+    'airline_reservations': ('/api/dashboard', '/api/analytics', '/api/revenue/', '/api/reports/', '/api/global-search', '/api/orders',
+                             '/api/customers', '/api/travelers', '/api/pss/', '/api/documents',
+                                                            '/api/shares', '/api/tasks', '/api/notifications', '/api/session', '/api/logout',
+                               '/api/setup/unused-tickets', '/api/setup/fare-optimization', '/api/setup/disruptions',
+                               '/api/setup/pss-weather', '/api/automation/run'),
+    'airline_operations': ('/api/dashboard', '/api/analytics', '/api/revenue/', '/api/reports/', '/api/global-search', '/api/pss/',
+                            '/api/orders', '/api/travelers', '/api/tasks', '/api/notifications',
+                                                          '/api/documents', '/api/session', '/api/logout',
+                                                             '/api/setup/unused-tickets', '/api/setup/fare-optimization', '/api/setup/disruptions',
+                               '/api/setup/pss-weather', '/api/automation/run'),
+    'agency_admin': ('/api/session', '/api/logout', '/api/dashboard', '/api/reports/', '/api/pss/partner-workspace',
                      '/api/pss/partner-clients', '/api/pss/partner-bookings/', '/api/pss/partner-payments/',
                      '/api/pss/partner-users', '/api/pss/bookings', '/api/pss/flights',
                      '/api/customers', '/api/estimates', '/api/invoices', '/api/payments',
                      '/api/finance/summary', '/api/credit-notes', '/api/tasks', '/api/notifications',
                      '/api/documents', '/api/shares', '/api/public/share/', '/api/pss/airport-info'),
-    'agency_agent': ('/api/session', '/api/logout', '/api/dashboard', '/api/pss/partner-workspace',
+    'agency_agent': ('/api/session', '/api/logout', '/api/dashboard', '/api/reports/', '/api/pss/partner-workspace',
                      '/api/pss/partner-clients', '/api/pss/partner-bookings/', '/api/pss/partner-payments/',
                      '/api/pss/bookings', '/api/pss/flights',
                      '/api/customers', '/api/estimates', '/api/invoices', '/api/payments',
@@ -107,6 +246,103 @@ def make_token():
     return base64.urlsafe_b64encode(os.urandom(24)).decode('ascii').rstrip('=')
 
 
+def _today():
+    return date.today().isoformat()
+
+
+WEBHOOK_EVENTS = (
+    'offer.created', 'order.created', 'order.cancelled', 'booking.created',
+    'payment.received', 'disruption.created', 'rebooking.confirmed', 'tenant.onboarded'
+)
+
+
+def _json_load(value, default=None):
+    try:
+        return json.loads(value) if value else (default if default is not None else {})
+    except Exception:
+        return default if default is not None else {}
+
+
+def _event_list(value):
+    if isinstance(value, (list, tuple)):
+        return [str(v).strip() for v in value if str(v).strip()]
+    return [v.strip() for v in str(value or '').split(',') if v.strip()]
+
+
+def _hash_api_key(token):
+    return hashlib.sha256((token or '').encode('utf-8')).hexdigest()
+
+
+def _webhook_event(tenant_id, event, payload, object_id=None):
+    try:
+        with db() as conn:
+            subscribers = q(conn, "SELECT * FROM pss_webhooks WHERE tenant_id=? AND status='active'", (tenant_id,))
+            body = json.dumps({
+                'id': str(uuid.uuid4()),
+                'type': event,
+                'created_at': now_iso(),
+                'data': payload,
+            }, default=str)
+            for hook in subscribers:
+                events = _event_list(hook.get('events'))
+                if event not in events and '*' not in events:
+                    continue
+                conn.execute("""INSERT INTO pss_webhook_deliveries
+                    (tenant_id,webhook_id,event,object_id,payload,status,attempts,created_at)
+                    VALUES (?,?,?,?,?,'pending',0,?)""",
+                    (tenant_id, hook['id'], event, object_id or '', body, now_iso()))
+    except Exception as exc:
+        print(f"[webhook] queue failed: {exc}", file=sys.stderr)
+    try:
+        _deliver_webhooks(tenant_id)
+    except Exception as exc:
+        print(f"[webhook] delivery failed: {exc}", file=sys.stderr)
+
+
+def _deliver_webhooks(tenant_id=None):
+    params = [] if tenant_id is None else [tenant_id]
+    where = "WHERE d.status IN ('pending','failed') AND (d.next_retry_at IS NULL OR d.next_retry_at<=?)"
+    args = [now_iso()] + params
+    if tenant_id is not None:
+        where += " AND d.tenant_id=?"
+    with db() as conn:
+        rows = q(conn, f"""SELECT d.*, w.url, w.secret FROM pss_webhook_deliveries d
+                           JOIN pss_webhooks w ON w.id=d.webhook_id {where}
+                           ORDER BY d.id LIMIT 25""", tuple(args))
+        for row in rows:
+            attempts = int(row.get('attempts') or 0) + 1
+            signature = hmac.new((row.get('secret') or '').encode('utf-8'),
+                                 (row.get('payload') or '').encode('utf-8'), hashlib.sha256).hexdigest()
+            req = urllib.request.Request(
+                row.get('url') or '',
+                data=(row.get('payload') or '').encode('utf-8'),
+                headers={'Content-Type': 'application/json', 'X-Fayaka-Event': row.get('event') or '',
+                         'X-Fayaka-Signature': f'sha256={signature}'},
+                method='POST')
+            try:
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    code = getattr(resp, 'status', 200)
+                    body = resp.read(500).decode('utf-8', 'ignore')
+                conn.execute("""UPDATE pss_webhook_deliveries SET status='delivered',attempts=?,response_code=?,
+                                response_body=?,delivered_at=?,next_retry_at=NULL WHERE id=?""",
+                             (attempts, code, body, now_iso(), row['id']))
+            except Exception as exc:
+                delay = min(300, 15 * (2 ** min(attempts, 5)))
+                retry_at = (datetime.utcnow() + timedelta(seconds=delay)).replace(microsecond=0).isoformat() + 'Z'
+                conn.execute("""UPDATE pss_webhook_deliveries SET status='failed',attempts=?,response_body=?,
+                                next_retry_at=? WHERE id=?""",
+                             (attempts, str(exc)[:500], retry_at, row['id']))
+
+
+def _webhook_worker():
+    while True:
+        time.sleep(20)
+        try:
+            _deliver_webhooks()
+        except Exception as exc:
+            print(f"[webhook] worker error: {exc}", file=sys.stderr)
+
+
 class PayloadTooLarge(Exception):
     pass
 
@@ -116,6 +352,10 @@ SESSION_IDLE = 25 * 60
 _SECURE_COOKIES_ENV = os.environ.get('SECURE_COOKIES')
 PBKDF2_ITERATIONS = 210_000
 MAX_BODY = int(os.environ.get('MAX_BODY_MB', '10')) * 1024 * 1024
+PORT = int(os.environ.get('PORT', 8000))
+SECRET_KEY = os.environ.get('SECRET_KEY', 'dev-change-me-in-prod')
+DEFAULT_TENANT = os.environ.get('DEFAULT_TENANT', 'fayaka')
+API_BASE = os.environ.get('API_BASE', '/app')
 
 
 def _use_secure_cookie(handler):
@@ -416,12 +656,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(b)))
         self.send_header('Cache-Control', 'no-store')
         self.send_header('X-Content-Type-Options', 'nosniff')
-        self.send_header('X-Frame-Options', 'DENY')
+        self.send_header('X-Frame-Options', 'SAMEORIGIN')
         self.send_header('Referrer-Policy', 'strict-origin-when-cross-origin')
         self.send_header('Content-Security-Policy',
                          "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
                          "img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; "
-                         "base-uri 'self'; frame-ancestors 'none'; form-action 'self'")
+                          "base-uri 'self'; frame-ancestors 'self'; form-action 'self'")
         if headers:
             for k, v in headers.items():
                 self.send_header(k, v)
@@ -453,13 +693,34 @@ class Handler(BaseHTTPRequestHandler):
         if not fs.startswith(static_root) or not os.path.isfile(fs):
             self._json({'error': 'Not found'}, 404)
             return
-        ctype = mimetypes.guess_type(fs)[0] or 'application/octet-stream'
+        ext = os.path.splitext(fs)[1].lower()
+        explicit_types = {
+            '.html': 'text/html; charset=utf-8', '.htm': 'text/html; charset=utf-8',
+            '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8',
+            '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8',
+            '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.ico': 'image/x-icon',
+            '.pdf': 'application/pdf', '.txt': 'text/plain; charset=utf-8',
+            '.woff': 'font/woff', '.woff2': 'font/woff2',
+        }
+        ctype = explicit_types.get(ext)
+        if not ctype:
+            guessed = mimetypes.guess_type(fs)[0] or 'application/octet-stream'
+            ctype = f'{guessed}; charset=utf-8' if guessed.startswith('text/') else guessed
         with open(fs, 'rb') as f:
             b = f.read()
         headers = None
-        if ctype.startswith('text/html'):
+        if ext in ('.html', '.htm'):
             headers = {'Set-Cookie': f'csrftoken={make_token()}; Path=/; SameSite=Lax'}
         self._send(b, 200, ctype, headers=headers)
+
+    def _serve_docs(self):
+        html = """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fayaka Partner API</title><style>body{font-family:system-ui,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:24px}main{max-width:1040px;margin:auto}h1{color:#7dd3fc}pre{background:#020617;padding:16px;border-radius:10px;overflow:auto}.card{background:#1e293b;padding:18px;border-radius:12px;margin:14px 0}code{color:#fbbf24}.badge{background:#0ea5e9;color:#04121f;padding:3px 8px;border-radius:999px;font-size:12px}</style></head>
+<body><main><h1>Fayaka Partner API</h1><p>Offer, order, payment and disruption workflows for small airlines.</p><div id="root">Loading API catalog...</div></main>
+<script>fetch('/api/public/v1/docs').then(r=>r.json()).then(d=>{document.getElementById('root').innerHTML='<div class="card"><span class="badge">v'+d.version+'</span><p><b>Auth:</b> '+d.auth+'</p><p><b>Base URL:</b> <code>'+location.origin+'</code></p></div>'+d.endpoints.map(e=>'<div class="card"><h3><code>'+e.method+' '+e.path+'</code></h3><p>'+e.description+'</p><pre>'+JSON.stringify(e.example,null,2)+'</pre></div>').join('')+'<div class="card"><h2>Webhook events</h2><pre>'+JSON.stringify(d.webhook_events,null,2)+'</pre><p>Signature header: <code>X-Fayaka-Signature: sha256=&lt;HMAC-SHA256 of raw body&gt;</code></p></div>';}).catch(e=>document.getElementById('root').textContent=e.message);</script></body></html>"""
+        self._send(html.encode('utf-8'), 200, 'text/html; charset=utf-8',
+                   headers={'Set-Cookie': f'csrftoken={make_token()}; Path=/; SameSite=Lax'})
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -473,6 +734,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_static('/portal.html')
         if path.startswith('/agency/'):
             return self._serve_static('/agency.html')
+        if path == '/docs' or path == '/docs/':
+            return self._serve_docs()
         return self._serve_static(path)
 
     def do_POST(self):
@@ -504,13 +767,33 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_api(self, method, path, qs):
         try:
-            if method in ('POST', 'PUT', 'DELETE', 'PATCH') and path != '/api/billing/flutterwave/webhook':
+            if (method in ('POST', 'PUT', 'DELETE', 'PATCH')
+                    and path != '/api/billing/flutterwave/webhook'
+                    and not path.startswith('/api/public/v1/')):
                 if not self._csrf_ok(path, qs):
                     return self._json({'error': 'CSRF token missing or invalid'}, 403)
             if path == '/api/health':
-                return self._json({'ok': True, 'time': now_iso()})
+                return self._json({'status': 'ok', 'tenant': DEFAULT_TENANT})
+            if path == '/api/public/v1/docs' and method == 'GET':
+                return self.api_public_docs()
+            if path == '/api/public/v1/offers' and method == 'POST':
+                return self.api_public_offer_create()
+            if path.startswith('/api/public/v1/offers/') and path.endswith('/orders') and method == 'POST':
+                return self.api_public_order_create(path.split('/')[5])
+            if path.startswith('/api/public/v1/offers/') and method == 'GET':
+                return self.api_public_offer_get(path.split('/')[5])
+            if path.startswith('/api/public/v1/orders/') and path.endswith('/cancel') and method == 'POST':
+                return self.api_public_order_cancel(path.split('/')[5])
+            if path.startswith('/api/public/v1/orders/') and method == 'GET':
+                return self.api_public_order_get(path.split('/')[5])
             if path == '/api/portal/disruptions' and method == 'GET':
                 return self.api_portal_disruptions(qs)
+            if path == '/api/portal/unused-tickets' and method == 'GET':
+                return self.api_portal_unused_tickets(qs)
+            if path == '/api/portal/ticket-status' and method == 'GET':
+                return self.api_portal_ticket_status(qs)
+            if path == '/api/portal/suppliers' and method == 'GET':
+                return self.api_portal_suppliers(qs)
             if path == '/api/portal/register' and method == 'POST':
                 return self.api_portal_register()
             if path == '/api/portal/login' and method == 'POST':
@@ -521,12 +804,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self.api_portal_me()
             if path == '/api/portal/documents' and method == 'GET':
                 return self.api_portal_documents_get(qs)
+            if path.startswith('/api/portal/documents/') and path.endswith('/download') and method == 'GET':
+                return self.api_portal_document_download(path.strip('/').split('/')[3], qs)
             if path == '/api/portal/documents' and method == 'POST':
                 return self.api_portal_documents_post()
             if path == '/api/pss/payments/flutterwave/init' and method == 'POST':
                 return self.api_pss_flw_init()
             if path == '/api/pss/payments/flutterwave/verify' and method == 'GET':
                 return self.api_pss_flw_verify(qs)
+            if path == '/api/portal/branding' and method == 'GET':
+                return self.api_portal_branding(qs)
             if path == '/api/portal/tenants' and method == 'GET':
                 return self.api_portal_tenants()
             if path == '/api/portal/flights' and method == 'GET':
@@ -580,7 +867,7 @@ class Handler(BaseHTTPRequestHandler):
                 if group == 'agency_agent' and method != 'GET' and not path.startswith((
                         '/api/login', '/api/logout', '/api/pss/partner-bookings/', '/api/pss/partner-payments/',
                         '/api/pss/partner-clients/', '/api/customers', '/api/estimates', '/api/invoices',
-                        '/api/payments', '/api/tasks', '/api/notifications', '/api/documents', '/api/shares')):
+                        '/api/payments', '/api/credit-notes', '/api/tasks', '/api/notifications', '/api/documents', '/api/shares')):
                     return self._json({'error': 'Access denied for your role'}, 403)
                 if group == 'agency_admin' and method != 'GET' and not path.startswith((
                         '/api/login', '/api/logout', '/api/pss/partner-bookings/', '/api/pss/partner-payments/',
@@ -595,6 +882,40 @@ class Handler(BaseHTTPRequestHandler):
                 return self.api_dashboard(tenant_id)
             if path == '/api/analytics' and method == 'GET':
                 return self.api_analytics(tenant_id)
+            if path == '/api/revenue/dashboard' and method == 'GET':
+                return self.api_revenue_dashboard(tenant_id, qs)
+            if path == '/api/reports/export' and method == 'GET':
+                return self.api_report_export(tenant_id, qs, user_id)
+            if path == '/api/loyalty/report' and method == 'GET':
+                return self.api_loyalty_report(tenant_id)
+            if path == '/api/pss/partner-reports' and method == 'GET':
+                return self.api_partner_reports(tenant_id)
+            if path == '/api/developer/api-keys' and method == 'GET':
+                return self.api_developer_api_keys(tenant_id, 'GET')
+            if path == '/api/developer/api-keys' and method == 'POST':
+                return self.api_developer_api_keys(tenant_id, 'POST', user_id=user_id)
+            if path.startswith('/api/developer/api-keys/') and method == 'DELETE':
+                return self.api_developer_api_keys(tenant_id, 'DELETE', path.rsplit('/', 1)[-1])
+            if path == '/api/developer/webhooks' and method == 'GET':
+                return self.api_developer_webhooks(tenant_id, 'GET')
+            if path == '/api/developer/webhooks' and method == 'POST':
+                return self.api_developer_webhooks(tenant_id, 'POST', user_id=user_id)
+            if path.startswith('/api/developer/webhooks/') and path.endswith('/retry') and method == 'POST':
+                return self.api_developer_webhook_retry(tenant_id, path.split('/')[4])
+            if path.startswith('/api/developer/webhooks/') and method in ('PUT', 'DELETE'):
+                return self.api_developer_webhooks(tenant_id, method, path.rsplit('/', 1)[-1], user_id=user_id)
+            if path == '/api/developer/deliveries' and method == 'GET':
+                return self.api_developer_deliveries(tenant_id)
+            if path == '/api/developer/docs' and method == 'GET':
+                return self.api_public_docs()
+            if path == '/api/onboarding/status' and method in ('GET', 'POST'):
+                return self.api_onboarding_status(tenant_id, method, user_id=user_id)
+            if path == '/api/onboarding/create-tenant' and method == 'POST':
+                return self.api_onboarding_create_tenant(tenant_id, user_id)
+            if path == '/api/pss/disruptions/impact' and method == 'GET':
+                return self.api_disruption_impact(tenant_id, qs)
+            if path == '/api/pss/disruptions/rebook' and method == 'POST':
+                return self.api_disruption_rebook(tenant_id, user_id)
             if path == '/api/pss/ancillary-sales' and method == 'GET':
                 return self.api_pss_ancillary_sales(tenant_id)
             if path.startswith('/api/pss/bookings/') and path.endswith('/status') and method == 'POST':
@@ -647,6 +968,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.api_pss_charters(tenant_id, method, path.rsplit('/', 1)[-1])
             if path == '/api/pss/charter-flights' and method == 'GET':
                 return self.api_pss_charter_flights(tenant_id)
+            if path == '/api/pss/charter-flights' and method == 'POST':
+                return self.api_pss_charter_flight_mutate(tenant_id, None, 'POST', user_id)
+            if path.startswith('/api/pss/charter-flights/') and method in ('GET', 'PUT', 'DELETE'):
+                return self.api_pss_charter_flight_mutate(tenant_id, path.rsplit('/', 1)[-1], method, user_id)
             if path == '/api/pss/trace' and method == 'GET':
                 return self.api_pss_trace(tenant_id, qs)
             if path.startswith('/api/pss/trace/') and method == 'GET':
@@ -685,6 +1010,62 @@ class Handler(BaseHTTPRequestHandler):
                 return self.api_pss_bookings(tenant_id, 'GET', sess=sess)
             if path == '/api/pss/bookings' and method == 'POST':
                 return self.api_pss_bookings(tenant_id, 'POST', user_id=user_id, sess=sess)
+            if path == '/api/pss/seat-holds' and method == 'GET':
+                return self.api_pss_seat_holds(tenant_id)
+            if path == '/api/pss/seat-holds' and method == 'POST':
+                return self.api_pss_seat_hold_create(tenant_id, user_id)
+            if path.startswith('/api/pss/seat-holds/') and method == 'DELETE':
+                return self.api_pss_seat_hold_release(tenant_id, user_id, path.rsplit('/', 1)[-1])
+            if path == '/api/pss/inventory/dates' and method == 'GET':
+                return self.api_inventory_dates(tenant_id, user_id)
+            if path == '/api/pss/inventory/legs' and method == 'POST':
+                return self.api_inventory_legs(tenant_id, user_id, 'POST')
+            if path.startswith('/api/pss/inventory/legs/') and method in ('PUT', 'DELETE'):
+                return self.api_inventory_legs(tenant_id, user_id, method, path.rsplit('/', 1)[-1])
+            if path == '/api/pss/inventory/segments' and method == 'POST':
+                return self.api_inventory_segments(tenant_id, user_id, 'POST')
+            if path.startswith('/api/pss/inventory/segments/') and method in ('PUT', 'DELETE'):
+                return self.api_inventory_segments(tenant_id, user_id, method, path.rsplit('/', 1)[-1])
+            if path == '/api/pss/inventory/availability' and method == 'GET':
+                return self.api_inventory_availability(tenant_id, qs)
+            if path == '/api/pss/inventory/availability/publish' and method == 'POST':
+                return self.api_inventory_availability_publish(tenant_id, user_id)
+            if path == '/api/pss/inventory/rules' and method == 'GET':
+                return self.api_inventory_rules(tenant_id)
+            if path == '/api/pss/inventory/rules' and method == 'POST':
+                return self.api_inventory_rules(tenant_id, user_id, 'POST')
+            if path.startswith('/api/pss/inventory/rules/') and method in ('PUT', 'DELETE'):
+                return self.api_inventory_rules(tenant_id, user_id, method, path.rsplit('/', 1)[-1])
+            if path == '/api/pss/inventory/mass-update' and method == 'POST':
+                return self.api_inventory_mass_update(tenant_id, user_id)
+            if path == '/api/pss/inventory/overbooking' and method == 'GET':
+                return self.api_inventory_overbooking(tenant_id)
+            if path == '/api/pss/inventory/overbooking/resolve' and method == 'POST':
+                return self.api_inventory_overbooking_resolve(tenant_id, user_id)
+            if path == '/api/pss/inventory/history' and method == 'GET':
+                return self.api_inventory_history(tenant_id)
+            if path == '/api/pss/inventory/queue' and method == 'GET':
+                return self.api_inventory_queue(tenant_id)
+            if path.startswith('/api/pss/inventory/queue/') and path.endswith('/resolve') and method == 'POST':
+                return self.api_inventory_queue_resolve(tenant_id, user_id, path.split('/')[5])
+            if path == '/api/pss/inventory/valuation' and method == 'GET':
+                return self.api_inventory_valuation(tenant_id)
+            if path == '/api/pss/inventory/valuation' and method == 'POST':
+                return self.api_inventory_valuation(tenant_id, user_id, 'POST')
+            if path.startswith('/api/pss/inventory/valuation/') and method in ('PUT', 'DELETE'):
+                return self.api_inventory_valuation(tenant_id, user_id, method, path.rsplit('/', 1)[-1])
+            if path == '/api/pss/inventory/uncommitted' and method == 'GET':
+                return self.api_inventory_uncommitted(tenant_id, user_id)
+            if path.startswith('/api/pss/inventory/uncommitted/') and path.endswith('/release') and method == 'POST':
+                return self.api_inventory_uncommitted_action(tenant_id, user_id, path.split('/')[5], 'release')
+            if path.startswith('/api/pss/inventory/uncommitted/') and path.endswith('/confirm') and method == 'POST':
+                return self.api_inventory_uncommitted_action(tenant_id, user_id, path.split('/')[5], 'confirm')
+            if path == '/api/pss/inventory/market' and method == 'GET':
+                return self.api_inventory_market(tenant_id)
+            if path == '/api/pss/inventory/market/refresh' and method == 'POST':
+                return self.api_inventory_market_refresh(tenant_id)
+            if path == '/api/pss/inventory/help' and method == 'GET':
+                return self.api_inventory_help()
             if path.startswith('/api/pss/bookings/') and path.endswith('/ticket') and method == 'POST':
                 return self.api_pss_booking_ticket(tenant_id, user_id, path.split('/')[4], sess=sess)
             if path.startswith('/api/pss/bookings/') and path.endswith('/checkin') and method == 'POST':
@@ -695,10 +1076,26 @@ class Handler(BaseHTTPRequestHandler):
                 return self.api_pss_booking_detail(tenant_id, path.rsplit('/', 1)[-1], sess=sess)
             if path.startswith('/api/pss/bookings/') and method in ('PUT', 'DELETE'):
                 return self.api_pss_bookings(tenant_id, method, path.rsplit('/', 1)[-1], user_id=user_id, sess=sess)
+            if path == '/api/pss/baggage/tracking' and method == 'GET':
+                return self.api_pss_baggage_tracking(tenant_id, qs)
+            if path.startswith('/api/pss/baggage/') and path.endswith('/scan') and method == 'POST':
+                return self.api_pss_baggage_scan(tenant_id, path.split('/')[4], user_id)
+            if path.startswith('/api/pss/checkins/') and method == 'GET' and path.count('/') == 4:
+                return self.api_pss_checkin_baggage(tenant_id, path.split('/')[4])
+            if path.startswith('/api/pss/checkins/') and path.endswith('/baggage') and method == 'GET':
+                return self.api_pss_checkin_baggage(tenant_id, path.split('/')[4])
+            if path.startswith('/api/pss/checkins/') and path.endswith('/baggage') and method == 'POST':
+                return self.api_pss_checkin_baggage_mutate(tenant_id, path.split('/')[4], user_id)
+            if path.startswith('/api/pss/checkins/') and path.endswith('/status') and method == 'POST':
+                return self.api_pss_checkin_status(tenant_id, path.split('/')[4], user_id)
             if path == '/api/pss/checkins' and method == 'GET':
                 return self.api_pss_checkins(tenant_id)
+            if path == '/api/pss/checkins' and method == 'POST':
+                return self.api_pss_checkin_create(tenant_id, user_id, sess=sess)
             if path == '/api/pss/payments' and method == 'GET':
                 return self.api_pss_payments(tenant_id, sess=sess)
+            if path.startswith('/api/pss/payments/') and method in ('GET', 'PUT'):
+                return self.api_pss_payment_mutate(tenant_id, path.rsplit('/', 1)[-1], method)
             if path == '/api/pss/stock' and method == 'GET':
                 return self.api_pss_stock(tenant_id)
             if path == '/api/pss/stock' and method == 'POST':
@@ -744,10 +1141,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self.api_invoices(tenant_id, sess=sess)
             if path == '/api/invoices' and method == 'POST':
                 return self.api_invoice_create(tenant_id, user_id, sess=sess)
+            if path.startswith('/api/invoices/') and method in ('GET', 'PUT', 'DELETE'):
+                return self.api_invoice_mutate(tenant_id, user_id, path.rsplit('/', 1)[-1], method, sess=sess)
             if path == '/api/payments' and method == 'GET':
                 return self.api_payments(tenant_id, sess=sess)
             if path == '/api/payments' and method == 'POST':
                 return self.api_payment_create(tenant_id, user_id, sess=sess)
+            if path.startswith('/api/payments/') and method in ('GET', 'PUT', 'DELETE'):
+                return self.api_payment_mutate(tenant_id, user_id, path.rsplit('/', 1)[-1], method, sess=sess)
+            if path.startswith('/api/credit-notes/') and method == 'GET':
+                return self.api_generic_detail(tenant_id, 'credit_notes', path.rsplit('/', 1)[-1], sess=sess)
+            if path.startswith('/api/estimates/') and method == 'GET':
+                return self.api_generic_detail(tenant_id, 'estimates', path.rsplit('/', 1)[-1], sess=sess)
             if path == '/api/finance/summary' and method == 'GET':
                 return self.api_finance_summary(tenant_id, sess=sess)
             if path == '/api/tasks' and method == 'GET':
@@ -787,6 +1192,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self.api_order_item_create(tenant_id, path.split('/')[3])
             if path.startswith('/api/customers/') and method in ('PUT', 'DELETE'):
                 return self.api_customer_mutate(tenant_id, path.rsplit('/', 1)[-1], method, sess=sess)
+            if path.startswith('/api/customers/') and method == 'GET':
+                with db() as conn:
+                    cust = q(conn, "SELECT * FROM customers WHERE id=? AND tenant_id=?", (self._oid(path.rsplit('/', 1)[-1]), tenant_id), one=True)
+                if not cust or not self._row_allowed(cust, sess):
+                    return self._json({'error': 'Not found'}, 404)
+                return self._json({'customer': cust})
             if path == '/api/travelers' and method == 'GET':
                 return self.api_travelers_list(tenant_id)
             if path == '/api/travelers' and method == 'POST':
@@ -830,6 +1241,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self.api_agency_profile_get(tenant_id)
             if path == '/api/setup/agency-profile' and method == 'POST':
                 return self.api_agency_profile_save(tenant_id)
+            if path == '/api/setup/unused-tickets' and method == 'GET':
+                return self.api_unused_tickets(tenant_id)
+            if path == '/api/setup/unused-tickets/refund' and method == 'POST':
+                return self.api_unused_ticket_refund(tenant_id, user_id)
+            if path == '/api/setup/fare-optimization' and method in ('GET', 'POST'):
+                return self.api_fare_optimization(tenant_id, user_id, apply=method == 'POST')
+            if path == '/api/automation/run' and method == 'POST':
+                return self.api_run_automation(tenant_id, user_id)
             setup_map = {
                 'users': ('users', 'users'),
                 'chart-of-accounts': ('chart_of_accounts', 'accounts'),
@@ -897,6 +1316,20 @@ class Handler(BaseHTTPRequestHandler):
                 return self.api_chart_account_create(tenant_id)
             if path.startswith('/api/finance/chart-of-accounts/') and method in ('PUT', 'DELETE'):
                 return self.api_chart_account_mutate(tenant_id, path.rsplit('/', 1)[-1], method)
+            if path == '/api/bills' and method == 'GET':
+                return self.api_bills_list(tenant_id, sess=sess)
+            if path == '/api/bills' and method == 'POST':
+                return self.api_bill_create(tenant_id, user_id, sess=sess)
+            if path == '/api/expenses' and method == 'GET':
+                return self.api_expenses_list(tenant_id, sess=sess)
+            if path == '/api/expenses' and method == 'POST':
+                return self.api_expense_create(tenant_id, user_id, sess=sess)
+            if path.startswith('/api/bills/') and path.endswith('/pay') and method == 'POST':
+                return self.api_bill_pay(tenant_id, user_id, path.split('/')[3], sess=sess)
+            if path.startswith('/api/bills/') and method in ('PUT', 'DELETE'):
+                return self.api_bill_mutate(tenant_id, path.rsplit('/', 1)[-1], method, sess=sess)
+            if path.startswith('/api/expenses/') and method in ('PUT', 'DELETE'):
+                return self.api_expense_mutate(tenant_id, path.rsplit('/', 1)[-1], method, sess=sess)
             if path == '/api/finance/bills' and method == 'GET':
                 return self.api_bills_list(tenant_id, sess=sess)
             if path == '/api/finance/bills' and method == 'POST':
@@ -943,10 +1376,12 @@ class Handler(BaseHTTPRequestHandler):
         fail_key = 'airline:' + hashlib.sha256(str(ip).encode()).hexdigest()[:16]
         locked_until = _login_locked_until(fail_key)
         if locked_until and locked_until > time.time():
+            print(f"[login] locked ip={ip}", file=sys.stderr)
             return self._json({'error': 'Too many failed attempts. Try again later.'}, 401)
         with db() as conn:
             t = q(conn, "SELECT * FROM tenants WHERE code=? AND status='active'", (tenant_code,), one=True)
             if not t:
+                print(f"[login] failed tenant={tenant_code} reason=unknown_tenant", file=sys.stderr)
                 _note_login_fail(fail_key)
                 return self._json({'error': 'Invalid tenant'}, 401)
             u = q(conn, "SELECT * FROM users WHERE tenant_id=? AND username=? AND status='active'",
@@ -955,6 +1390,7 @@ class Handler(BaseHTTPRequestHandler):
             if upgraded:
                 conn.execute("UPDATE users SET password=? WHERE id=?", (upgraded, u['id']))
             if not u or not ok:
+                print(f"[login] failed tenant={tenant_code} username={username} reason={'no_user' if not u else 'bad_password'}", file=sys.stderr)
                 _note_login_fail(fail_key)
                 try:
                     log_audit(conn, t['id'], None, 'login_failed', 'user', None, {'username': username, 'ip': ip})
@@ -1405,6 +1841,83 @@ class Handler(BaseHTTPRequestHandler):
             log_audit(conn, tenant_id, user_id, 'create', 'payment', pid, {'payment_no': pno})
         return self._json({'ok': True, 'payment_id': pid, 'payment_no': pno})
 
+    def api_invoice_mutate(self, tenant_id, user_id, iid, method, sess=None):
+        from ingest import recompute_invoice
+        iid = self._oid(iid)
+        with db() as conn:
+            row = q(conn, "SELECT * FROM invoices WHERE id=? AND tenant_id=?", (iid, tenant_id), one=True)
+            if not row or not self._row_allowed(row, sess):
+                return self._json({'error': 'Invoice not found'}, 404)
+            if method == 'GET':
+                return self._json({'invoice': row})
+            if method == 'DELETE':
+                conn.execute("DELETE FROM invoice_lines WHERE tenant_id=? AND invoice_id=?", (tenant_id, iid))
+                conn.execute("DELETE FROM journals WHERE tenant_id=? AND ref_type='invoice' AND ref_id=?", (tenant_id, iid))
+                conn.execute("DELETE FROM invoices WHERE id=? AND tenant_id=?", (iid, tenant_id))
+                log_audit(conn, tenant_id, user_id, 'delete', 'invoice', iid, {'invoice_no': row.get('invoice_no')})
+                return self._json({'ok': True})
+            data = read_json(self)
+            allowed = ('branch_id', 'order_id', 'customer_id', 'invoice_no', 'kind', 'status', 'issue_date',
+                       'due_date', 'currency', 'subtotal', 'tax', 'fees', 'discount', 'total', 'notes')
+            sets, args = [], []
+            for key in allowed:
+                if key in data:
+                    sets.append(f"{key}=?")
+                    args.append(self._oid(data[key]) if key.endswith('_id') else data[key])
+            if not sets:
+                return self._json({'invoice': row})
+            args += [iid, tenant_id]
+            conn.execute(f"UPDATE invoices SET {','.join(sets)} WHERE id=? AND tenant_id=?", args)
+            recompute_invoice(conn, iid)
+            updated = q(conn, "SELECT * FROM invoices WHERE id=? AND tenant_id=?", (iid, tenant_id), one=True)
+            log_audit(conn, tenant_id, user_id, 'update', 'invoice', iid, {'invoice_no': updated.get('invoice_no') if updated else row.get('invoice_no')})
+        return self._json({'ok': True, 'invoice': updated})
+
+    def api_payment_mutate(self, tenant_id, user_id, pid, method, sess=None):
+        from ingest import recompute_invoice
+        pid = self._oid(pid)
+        with db() as conn:
+            row = q(conn, "SELECT * FROM payments WHERE id=? AND tenant_id=?", (pid, tenant_id), one=True)
+            if not row or not self._row_allowed(row, sess):
+                return self._json({'error': 'Payment not found'}, 404)
+            if method == 'GET':
+                return self._json({'payment': row})
+            if method == 'DELETE':
+                conn.execute("DELETE FROM allocations WHERE tenant_id=? AND payment_id=?", (tenant_id, pid))
+                conn.execute("DELETE FROM journals WHERE tenant_id=? AND ref_type='payment' AND ref_id=?", (tenant_id, pid))
+                conn.execute("DELETE FROM payments WHERE id=? AND tenant_id=?", (pid, tenant_id))
+                if row.get('invoice_id'):
+                    recompute_invoice(conn, row['invoice_id'])
+                log_audit(conn, tenant_id, user_id, 'delete', 'payment', pid, {'payment_no': row.get('payment_no')})
+                return self._json({'ok': True})
+            data = read_json(self)
+            allowed = ('branch_id', 'invoice_id', 'order_id', 'customer_id', 'payment_no', 'method', 'reference',
+                       'amount', 'currency', 'status', 'paid_at', 'notes')
+            sets, args = [], []
+            for key in allowed:
+                if key in data:
+                    sets.append(f"{key}=?")
+                    args.append(self._oid(data[key]) if key.endswith('_id') else data[key])
+            if not sets:
+                return self._json({'payment': row})
+            args += [pid, tenant_id]
+            conn.execute(f"UPDATE payments SET {','.join(sets)} WHERE id=? AND tenant_id=?", args)
+            if row.get('invoice_id'):
+                recompute_invoice(conn, row['invoice_id'])
+            updated = q(conn, "SELECT * FROM payments WHERE id=? AND tenant_id=?", (pid, tenant_id), one=True)
+            log_audit(conn, tenant_id, user_id, 'update', 'payment', pid, {'payment_no': updated.get('payment_no') if updated else row.get('payment_no')})
+        return self._json({'ok': True, 'payment': updated})
+
+    def api_generic_detail(self, tenant_id, table, rid, sess=None):
+        if table not in ('credit_notes', 'estimates'):
+            return self._json({'error': 'Not found'}, 404)
+        rid = self._oid(rid)
+        with db() as conn:
+            row = q(conn, f"SELECT * FROM {table} WHERE id=? AND tenant_id=?", (rid, tenant_id), one=True)
+        if not row or not self._row_allowed(row, sess):
+            return self._json({'error': 'Not found'}, 404)
+        return self._json({table[:-1]: row})
+
     def api_finance_summary(self, tenant_id, sess=None):
         with db() as conn:
             agency_id = (sess or {}).get('agency_id')
@@ -1418,9 +1931,14 @@ class Handler(BaseHTTPRequestHandler):
                 ap = q(conn, "SELECT COALESCE(SUM(balance),0) balance, COALESCE(SUM(total),0) total, COALESCE(SUM(amount_paid),0) paid FROM bills WHERE tenant_id=?", (tenant_id,), one=True)
                 expenses = q(conn, "SELECT COALESCE(SUM(amount),0) total, COUNT(*) c FROM expenses WHERE tenant_id=?", (tenant_id,), one=True)
                 rev = q(conn, "SELECT COALESCE(SUM(total_sell),0) sell, COALESCE(SUM(total_cost),0) cost, COALESCE(SUM(margin),0) margin FROM orders WHERE tenant_id=?", (tenant_id,), one=True)
-            pnl = q(conn, """SELECT COALESCE(SUM(CASE WHEN account_type='income' THEN amount ELSE -amount END),0) amount
-                             FROM journals j LEFT JOIN chart_of_accounts a ON a.code=j.debit_account AND a.tenant_id=j.tenant_id
-                             WHERE j.tenant_id=?""", (tenant_id,), one=True)
+            pnl_sql = """SELECT COALESCE(SUM(CASE WHEN account_type='income' THEN amount ELSE -amount END),0) amount
+                         FROM journals j LEFT JOIN chart_of_accounts a ON a.code=j.debit_account AND a.tenant_id=j.tenant_id
+                         WHERE j.tenant_id=?"""
+            pnl_args = [tenant_id]
+            if agency_id:
+                pnl_sql += " AND j.agency_id=?"
+                pnl_args.append(agency_id)
+            pnl = q(conn, pnl_sql, pnl_args, one=True)
             if agency_id:
                 journals = q(conn, "SELECT * FROM journals WHERE tenant_id=? AND agency_id=? ORDER BY id DESC LIMIT 50", (tenant_id, agency_id))
             else:
@@ -1439,14 +1957,25 @@ class Handler(BaseHTTPRequestHandler):
                                         WHEN julianday('now')-julianday(i.due_date)<=60 THEN '31-60'
                                         WHEN julianday('now')-julianday(i.due_date)<=90 THEN '61-90' ELSE '90+' END bucket
                                    FROM invoices i LEFT JOIN customers c ON c.id=i.customer_id WHERE i.tenant_id=? AND i.balance>0 ORDER BY i.due_date IS NULL, i.due_date LIMIT 100""", (tenant_id,))
-            bill_aging = q(conn, """SELECT bill_no supplier_bill, balance, due_date, supplier,
-                                    CASE WHEN due_date IS NULL OR due_date>=date('now') THEN 'current'
-                                         WHEN julianday('now')-julianday(due_date)<=30 THEN '1-30'
-                                         WHEN julianday('now')-julianday(due_date)<=60 THEN '31-60'
-                                         WHEN julianday('now')-julianday(due_date)<=90 THEN '61-90' ELSE '90+' END bucket
-                                    FROM bills WHERE tenant_id=? AND balance>0 ORDER BY due_date IS NULL, due_date LIMIT 100""", (tenant_id,))
+            bill_sql = """SELECT bill_no supplier_bill, balance, due_date, supplier,
+                                 CASE WHEN due_date IS NULL OR due_date>=date('now') THEN 'current'
+                                      WHEN julianday('now')-julianday(due_date)<=30 THEN '1-30'
+                                      WHEN julianday('now')-julianday(due_date)<=60 THEN '31-60'
+                                      WHEN julianday('now')-julianday(due_date)<=90 THEN '61-90' ELSE '90+' END bucket
+                                 FROM bills WHERE tenant_id=? AND balance>0"""
+            bill_args = [tenant_id]
+            if agency_id:
+                bill_sql += " AND agency_id=?"
+                bill_args.append(agency_id)
+            bill_sql += " ORDER BY due_date IS NULL, due_date LIMIT 100"
+            bill_aging = q(conn, bill_sql, bill_args)
             accounts = q(conn, "SELECT code,name,account_type,account_group,normal_balance,is_active FROM chart_of_accounts WHERE tenant_id=? ORDER BY code", (tenant_id,))
-            cash = q(conn, "SELECT COALESCE(SUM(amount),0) c FROM journals WHERE tenant_id=? AND (debit_account='Petty Cash' OR credit_account='Petty Cash')", (tenant_id,), one=True)
+            cash_sql = "SELECT COALESCE(SUM(amount),0) c FROM journals WHERE tenant_id=? AND (debit_account='Petty Cash' OR credit_account='Petty Cash')"
+            cash_args = [tenant_id]
+            if agency_id:
+                cash_sql += " AND agency_id=?"
+                cash_args.append(agency_id)
+            cash = q(conn, cash_sql, cash_args, one=True)
         return self._json({'ar': ar, 'ap': ap, 'revenue': rev, 'expenses': expenses, 'pnl': pnl, 'cash': cash,
                            'journals': journals, 'aging': aging, 'bill_aging': bill_aging, 'accounts': accounts})
 
@@ -1763,7 +2292,26 @@ class Handler(BaseHTTPRequestHandler):
         tx_ref = data_obj.get('tx_ref') or payload.get('tx_ref')
         if tx_ref and str(tx_ref).upper().startswith('PSS-'):
             with db() as conn:
-                self._apply_pss_flw(conn, str(tx_ref), payload, 'successful')
+                pay = q(conn, "SELECT * FROM pss_payments WHERE gateway_ref=? OR payment_no=? OR reference=? ORDER BY id DESC LIMIT 1",
+                        (str(tx_ref), str(tx_ref), str(tx_ref)), one=True)
+                if not pay:
+                    return self._json({'ok': True, 'ignored': True, 'reason': 'payment not found'})
+                gw = get_billing_gateway(conn, tenant_id=pay['tenant_id'], provider='flutterwave')
+                if not gw or not gw.get('secret_key'):
+                    return self._json({'ok': False, 'message': 'Gateway not configured'}, 400)
+                if gw.get('webhook_secret'):
+                    sent = self.headers.get('verif-hash') or self.headers.get('Verif-Hash') or ''
+                    if not hmac.compare_digest(str(sent), str(gw.get('webhook_secret'))):
+                        return self._json({'error': 'Invalid webhook signature'}, 401)
+                status, resp = flutterwave_verify(gw.get('secret_key'), tx_ref=str(tx_ref),
+                                                  transaction_id=data_obj.get('id') or payload.get('id'))
+                vdata = (resp or {}).get('data') or {}
+                amount_ok = float(vdata.get('amount') or 0) >= float(pay.get('amount') or 0)
+                currency_ok = str(vdata.get('currency') or '').upper() == str(pay.get('currency') or '').upper()
+                if (status not in (200, 201) or str(vdata.get('status') or '').lower() != 'successful'
+                        or not amount_ok or not currency_ok):
+                    return self._json({'ok': False, 'message': 'Payment verification failed'}, 400)
+                self._apply_pss_flw(conn, str(tx_ref), resp, 'successful')
             return self._json({'ok': True, 'pss': True})
         inv_id = meta.get('subscription_invoice_id')
         tenant_id = meta.get('tenant_id')
@@ -1808,6 +2356,122 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             return None
 
+    def _row_allowed(self, row, sess=None):
+        agency_id = (sess or {}).get('agency_id')
+        return not agency_id or row.get('agency_id') == agency_id
+
+    def _clean_logo_data(self, value):
+        raw = str(value or '').strip()
+        if not raw:
+            return ''
+        mimetype = 'image/png'
+        if raw.startswith('data:'):
+            if ';base64,' not in raw:
+                raise ValueError('Logo must be a base64 image')
+            header, raw = raw.split(',', 1)
+            mimetype = header[5:].split(';')[0].lower()
+        allowed = ('image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/svg+xml')
+        if mimetype not in allowed:
+            raise ValueError('Unsupported logo image format')
+        try:
+            decoded = base64.b64decode(raw, validate=True)
+        except Exception:
+            raise ValueError('Logo image is not valid base64')
+        if not decoded:
+            raise ValueError('Logo image is empty')
+        if len(decoded) > 2 * 1024 * 1024:
+            raise ValueError('Logo must be smaller than 2 MB')
+        signatures = (b'\x89PNG\r\n\x1a\n', b'\xff\xd8\xff', b'GIF8', b'RIFF')
+        if not (decoded.startswith(signatures) or decoded.lstrip().startswith((b'<svg', b'<?xml'))):
+            raise ValueError('Unsupported logo image format')
+        return f"data:{mimetype};base64,{base64.b64encode(decoded).decode('ascii')}"
+
+    def _last_name_matches(self, full_name, last):
+        last = str(last or '').strip(' ,.-').lower()
+        if len(last) < 3:
+            return False
+        parts = [p.strip(' ,.-') for p in str(full_name or '').lower().replace(',', ' ').split()]
+        return any(p == last or (len(p) > 3 and len(last) > 3 and p.endswith(last) and len(p) - len(last) <= 2) for p in parts[-2:])
+
+    def _bag_tag_list(self, raw, count=0):
+        values = []
+        if isinstance(raw, (list, tuple, set)):
+            values = [str(x).strip() for x in raw]
+        elif raw:
+            values = [x.strip() for x in re.split(r'[,;\s]+', str(raw)) if x.strip()]
+        tags, seen = [], set()
+        for value in values:
+            key = value.upper()
+            if key not in seen:
+                seen.add(key)
+                tags.append(key)
+        try:
+            target = max(int(count or 0), len(tags))
+        except Exception:
+            target = len(tags)
+        while len(tags) < target:
+            tag = self._psn('BG')
+            if tag not in seen:
+                seen.add(tag)
+                tags.append(tag)
+        return tags[:target]
+
+    def _baggage_event(self, conn, tenant_id, bag, checkin_id, event_type, location=None, actor=None, note=None, trace_id=None):
+        ts = now_iso()
+        cur = conn.execute("""INSERT INTO pss_baggage_events(tenant_id,baggage_id,checkin_id,event_type,location,actor,note,created_at)
+                              VALUES (?,?,?,?,?,?,?,?)""",
+                           (tenant_id, bag.get('id') if isinstance(bag, dict) else bag, checkin_id, event_type,
+                            location, actor, note, ts))
+        event_id = cur.lastrowid
+        if trace_id:
+            tag = bag.get('bag_tag') if isinstance(bag, dict) else ''
+            self._trace(conn, tenant_id, 'counter', 'pss_baggage_item', bag.get('id') if isinstance(bag, dict) else bag,
+                        event_type, actor or 'system', f"{tag or ''} {location or ''} {note or ''}".strip(), trace_id, self)
+        return event_id
+
+    def _sync_baggage_items(self, conn, tenant_id, checkin, raw_tags, count=None, user_id=None, weight_kg=0, sale_no=None, trace_id=None):
+        tags = self._bag_tag_list(raw_tags, count if count is not None else checkin.get('bag_count'))
+        existing = q(conn, "SELECT * FROM pss_baggage_items WHERE tenant_id=? AND checkin_id=?", (tenant_id, checkin.get('id')))
+        by_tag = {str(r.get('bag_tag') or '').upper(): r for r in existing}
+        ts = now_iso()
+        pieces = max(len(tags), 1)
+        unit_weight = round(float(weight_kg or 0) / pieces, 2)
+        keep_ids = []
+        for idx, tag in enumerate(tags, 1):
+            while q(conn, "SELECT 1 FROM pss_baggage_items WHERE tenant_id=? AND UPPER(bag_tag)=UPPER(?) AND checkin_id<>?",
+                    (tenant_id, tag, checkin.get('id')), one=True):
+                tag = self._psn('BG')
+            tags[idx - 1] = tag
+            row = by_tag.get(tag.upper())
+            if not row:
+                cur = conn.execute("""INSERT INTO pss_baggage_items(tenant_id,checkin_id,booking_id,pnr,bag_tag,sequence_no,weight_kg,status,location,sale_no,flight_no,destination,carousel,created_at,updated_at)
+                                      VALUES (?,?,?,?,?,?,?,'tagged','check-in',?,?,?,?,?,?)""",
+                                   (tenant_id, checkin.get('id'), checkin.get('booking_id'), checkin.get('pnr'), tag, idx,
+                                    unit_weight, sale_no, checkin.get('flight_no'), checkin.get('destination'), None, ts, ts))
+                bag = {'id': cur.lastrowid, 'bag_tag': tag}
+                keep_ids.append(bag['id'])
+                self._baggage_event(conn, tenant_id, bag, checkin.get('id'), 'bag_tagged', 'check-in', user_id,
+                                    f"Bag {tag} tagged for {checkin.get('pnr') or checkin.get('checkin_no') or ''}", trace_id)
+            else:
+                bag = row
+                keep_ids.append(bag['id'])
+                conn.execute("""UPDATE pss_baggage_items SET sequence_no=?,weight_kg=CASE WHEN ?>0 THEN ? ELSE weight_kg END,
+                                sale_no=COALESCE(?,sale_no),flight_no=COALESCE(?,flight_no),destination=COALESCE(?,destination),updated_at=?
+                                WHERE id=? AND tenant_id=?""",
+                             (idx, unit_weight, unit_weight, sale_no, checkin.get('flight_no'), checkin.get('destination'), ts, bag['id'], tenant_id))
+        if keep_ids:
+            marks = ','.join('?' for _ in keep_ids)
+            orphans = q(conn, f"SELECT id FROM pss_baggage_items WHERE tenant_id=? AND checkin_id=? AND id NOT IN ({marks})",
+                        [tenant_id, checkin.get('id')] + keep_ids)
+        else:
+            orphans = q(conn, "SELECT id FROM pss_baggage_items WHERE tenant_id=? AND checkin_id=?", (tenant_id, checkin.get('id')))
+        for orphan in orphans:
+            conn.execute("DELETE FROM pss_baggage_events WHERE tenant_id=? AND baggage_id=?", (tenant_id, orphan['id']))
+            conn.execute("DELETE FROM pss_baggage_items WHERE tenant_id=? AND id=?", (tenant_id, orphan['id']))
+        conn.execute("UPDATE pss_checkins SET bag_count=?,bag_tags=?,updated_at=? WHERE id=? AND tenant_id=?",
+                     (len(tags), ', '.join(tags), ts, checkin.get('id'), tenant_id))
+        return tags
+
     def _branding(self, conn, tenant_id):
         row = q(conn, """SELECT t.name tenant_name, t.settings_json, b.*,
                                 a.company_name a_company_name, a.legal_name a_legal_name, a.address a_address,
@@ -1828,6 +2492,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_agency_profile_save(self, tenant_id):
         data = read_json(self)
+        if 'logo_data' in data:
+            try:
+                data['logo_data'] = self._clean_logo_data(data.get('logo_data'))
+            except ValueError as exc:
+                return self._json({'error': str(exc)}, 400)
         with db() as conn:
             ts = now_iso()
             existing = q(conn, "SELECT * FROM agency_profile WHERE tenant_id=?", (tenant_id,), one=True)
@@ -1848,8 +2517,7 @@ class Handler(BaseHTTPRequestHandler):
             full_addr = ', '.join(str(p) for p in addr_parts)
             location = data.get('city') or data.get('country') or data.get('address') or ''
             brand = q(conn, "SELECT * FROM tenant_branding WHERE tenant_id=?", (tenant_id,), one=True) or {}
-            logo_data = data.get('logo_data') if 'logo_data' in data else brand.get('logo_data')
-            logo_data = logo_data or ''
+            logo_data = data.get('logo_data') if 'logo_data' in data else (brand.get('logo_data') or '')
             logo_text = data.get('logo_text') or brand.get('logo_text') or (company[:3].upper() if company else 'TE')
             primary = data.get('primary_color') or brand.get('primary_color') or '#0f2742'
             accent = data.get('accent_color') or brand.get('accent_color') or '#0b6efd'
@@ -1906,6 +2574,193 @@ class Handler(BaseHTTPRequestHandler):
                 out[k] = v
         return out
 
+    def _as_date(self, value):
+        if not value:
+            return None
+        try:
+            return date.fromisoformat(str(value)[:10])
+        except Exception:
+            return None
+
+    def _expiry_from_issue(self, value):
+        d = self._as_date(value) or date.today()
+        try:
+            return d.replace(year=d.year + 1).isoformat()
+        except ValueError:
+            return d.replace(year=d.year + 1, day=28).isoformat()
+
+    def _sync_unused_tickets(self, conn, tenant_id):
+        ts = now_iso()
+        today = ts[:10]
+        candidates = q(conn, """SELECT b.id,b.pnr,b.passenger_name,b.ticket_number,b.ticket_status,
+                                       b.issue_date,b.total_amount,b.fare_amount,b.taxes,b.currency,b.updated_at,
+                                       f.flight_no,f.origin,f.destination,f.flight_date
+                                FROM pss_bookings b LEFT JOIN pss_flights f ON f.id=b.flight_id
+                                WHERE b.tenant_id=? AND b.ticket_number IS NOT NULL AND b.ticket_number<>''
+                                  AND COALESCE(b.booking_status,'') NOT IN ('checked_in','flown')
+                                  AND NOT EXISTS (SELECT 1 FROM pss_checkins ci
+                                                  WHERE ci.booking_id=b.id AND ci.status IN ('checked_in','flown'))
+                                  AND LOWER(COALESCE(b.ticket_status,'issued')) IN
+                                      ('issued','instant','ticketed','open_for_use','refunded','partially_refunded','void','no_show')""", (tenant_id,))
+        created = 0
+        updated = 0
+        for b in candidates:
+            ticket = (b.get('ticket_number') or '').strip().upper()
+            if not ticket:
+                continue
+            issue = (b.get('issue_date') or b.get('updated_at') or ts)[:10]
+            travel = (b.get('flight_date') or '')[:10] or None
+            expiry = self._expiry_from_issue(issue)
+            value = float(b.get('total_amount') or 0) or (float(b.get('fare_amount') or 0) + float(b.get('taxes') or 0))
+            raw_status = (b.get('ticket_status') or 'issued').lower()
+            if raw_status in ('refunded', 'partially_refunded'):
+                ticket_status, refund_status = 'refunded', 'refunded'
+            elif raw_status == 'void':
+                ticket_status, refund_status = 'voided', 'not_applicable'
+            else:
+                ticket_status, refund_status = 'unused', 'pending'
+            route = ' · '.join(x for x in [b.get('origin'), b.get('destination')] if x)
+            notes = f"Auto-created from booking {b.get('pnr') or b.get('id')}"
+            if route:
+                notes += f" ({route})"
+            existing = q(conn, "SELECT id,ticket_status,refund_status FROM unused_tickets WHERE tenant_id=? AND UPPER(ticket_no)=?",
+                         (tenant_id, ticket), one=True)
+            if not existing:
+                conn.execute("""INSERT INTO unused_tickets(tenant_id,ticket_no,pnr,traveler_name,airline,issue_date,travel_date,
+                                                          expiry_date,ticket_status,refund_status,value,currency,notes,created_at,updated_at)
+                                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                             (tenant_id, ticket, b.get('pnr'), b.get('passenger_name'), None, issue, travel,
+                              expiry, ticket_status, refund_status, value, b.get('currency') or 'USD', notes, ts, ts))
+                created += 1
+            elif (existing.get('ticket_status') != ticket_status or existing.get('refund_status') != refund_status) and ticket_status != 'unused':
+                conn.execute("UPDATE unused_tickets SET ticket_status=?,refund_status=?,updated_at=? WHERE id=? AND tenant_id=?",
+                             (ticket_status, refund_status, ts, existing['id'], tenant_id))
+                updated += 1
+        expired = conn.execute("""UPDATE unused_tickets SET ticket_status='expired', updated_at=?
+                                  WHERE tenant_id=? AND LOWER(COALESCE(ticket_status,''))='unused'
+                                    AND expiry_date IS NOT NULL AND expiry_date<?""", (ts, tenant_id, today))
+        refunded = self._sync_refunds_from_bookings(conn, tenant_id, ts)
+        return {'scanned': len(candidates), 'created': created, 'updated': updated,
+                'expired': getattr(expired, 'rowcount', 0) or 0, 'refunds': refunded}
+
+    def _sync_refunds_from_bookings(self, conn, tenant_id, ts):
+        rows = q(conn, """SELECT b.pnr,b.ticket_number,b.passenger_name,b.total_amount,b.currency,
+                                 b.fare_amount,b.taxes
+                          FROM pss_bookings b
+                          WHERE b.tenant_id=? AND b.ticket_number IS NOT NULL AND b.ticket_number<>''
+                            AND LOWER(COALESCE(b.ticket_status,'')) IN ('refunded','partially_refunded')""", (tenant_id,))
+        made = 0
+        for b in rows:
+            ticket = (b.get('ticket_number') or '').strip().upper()
+            refund_no = 'RF-' + ticket.replace('-', '')[:20]
+            if q(conn, "SELECT 1 FROM refunds WHERE tenant_id=? AND refund_no=?", (tenant_id, refund_no), one=True):
+                continue
+            amount = float(b.get('total_amount') or 0) or (float(b.get('fare_amount') or 0) + float(b.get('taxes') or 0))
+            conn.execute("""INSERT INTO refunds(tenant_id,refund_no,pnr,ticket_no,traveler_name,source,reason,amount,currency,
+                                                policy_check,auto_void,status,requested_at,processed_at,notes,created_at,updated_at)
+                            VALUES (?,?,?,?,?,'unused_ticket','ticket_not_used',?,?,'passed',?,?,?,?,?,?,?)""",
+                         (tenant_id, refund_no, b.get('pnr'), ticket, b.get('passenger_name'), amount,
+                          b.get('currency') or 'USD', 1, 'processed', ts, ts, 'Auto-created from refunded e-ticket', ts, ts))
+            made += 1
+        return made
+
+    def _auto_optimize_fares(self, conn, tenant_id, apply=True):
+        ts = now_iso()
+        today = date.today()
+        flights = q(conn, """SELECT id,flight_no,base_fare,base_fare_reference,fare_optimized_at,total_seats,
+                                    available_seats,flight_date
+                             FROM pss_flights
+                             WHERE tenant_id=? AND LOWER(COALESCE(status,'scheduled'))='scheduled'
+                               AND flight_date>=? ORDER BY flight_date LIMIT 200""", (tenant_id, today.isoformat()))
+        suggestions = []
+        updated = 0
+        for f in flights:
+            total = float(f.get('total_seats') or 0)
+            available = float(f.get('available_seats') or 0)
+            sold = max(0.0, total - available)
+            load = round(sold / total, 3) if total else 0.0
+            fd = self._as_date(f.get('flight_date'))
+            days = (fd - today).days if fd else 999
+            base = float(f.get('base_fare_reference') or f.get('base_fare') or 0)
+            current = float(f.get('base_fare') or 0)
+            if base <= 0:
+                continue
+            if load >= 0.85:
+                factor, action = 1.12, 'high demand +12%'
+            elif load >= 0.65:
+                factor, action = 1.07, 'strong demand +7%'
+            elif load >= 0.40:
+                factor, action = 1.03, 'steady demand +3%'
+            elif load < 0.25 and days <= 14:
+                factor, action = 0.92, 'low demand, close departure -8%'
+            else:
+                factor, action = 1.0, 'hold'
+            target = round(base * factor, 2)
+            if abs(target - current) < 0.01:
+                continue
+            suggestions.append({'flight_id': f['id'], 'flight_no': f.get('flight_no'), 'load_factor': load,
+                                'days_to_departure': days, 'current_fare': current, 'recommended_fare': target,
+                                'action': action})
+            if apply:
+                conn.execute("""UPDATE pss_flights
+                                SET base_fare=?, base_fare_reference=COALESCE(base_fare_reference,base_fare),
+                                    fare_optimized_at=?, updated_at=? WHERE id=? AND tenant_id=?""",
+                             (target, ts, ts, f['id'], tenant_id))
+                updated += 1
+        return {'updated': updated, 'suggestions': suggestions}
+
+    def api_unused_tickets(self, tenant_id):
+        with db() as conn:
+            automation = self._sync_unused_tickets(conn, tenant_id)
+            rows = q(conn, """SELECT * FROM unused_tickets WHERE tenant_id=?
+                              ORDER BY CASE LOWER(COALESCE(ticket_status,'')) WHEN 'unused' THEN 0 WHEN 'expired' THEN 1 ELSE 2 END,
+                                       expiry_date ASC, id DESC LIMIT 500""", (tenant_id,))
+        return self._json({'unused_tickets': rows, 'automation': automation})
+
+    def api_unused_ticket_refund(self, tenant_id, user_id):
+        data = read_json(self)
+        rid = self._oid(data.get('id'))
+        ticket = (data.get('ticket_no') or '').strip().upper()
+        with db() as conn:
+            row = None
+            if rid:
+                row = q(conn, "SELECT * FROM unused_tickets WHERE id=? AND tenant_id=?", (rid, tenant_id), one=True)
+            elif ticket:
+                row = q(conn, "SELECT * FROM unused_tickets WHERE tenant_id=? AND UPPER(ticket_no)=?", (tenant_id, ticket), one=True)
+            if not row:
+                return self._json({'error': 'Unused ticket not found'}, 404)
+            amount = float(data.get('amount') or row.get('value') or 0)
+            if amount <= 0:
+                return self._json({'error': 'Refund amount must be greater than zero'}, 400)
+            refund_no = 'RF-' + (row.get('ticket_no') or str(row['id'])).replace('-', '')[:20]
+            if not q(conn, "SELECT 1 FROM refunds WHERE tenant_id=? AND refund_no=?", (tenant_id, refund_no), one=True):
+                ts = now_iso()
+                conn.execute("""INSERT INTO refunds(tenant_id,refund_no,pnr,ticket_no,traveler_name,source,reason,amount,currency,
+                                                    policy_check,auto_void,status,requested_at,notes,created_at,updated_at)
+                                VALUES (?,?,?,?,?,'unused_ticket','unused_ticket_refund',?,?,'passed',?,?,?,?,?,?)""",
+                             (tenant_id, refund_no, row.get('pnr'), row.get('ticket_no'), row.get('traveler_name'),
+                              amount, row.get('currency') or 'USD', 0, 'pending', ts,
+                              data.get('notes') or 'Refund requested from unused tickets', ts, ts))
+            conn.execute("UPDATE unused_tickets SET refund_status='requested',updated_at=? WHERE id=? AND tenant_id=?",
+                         (now_iso(), row['id'], tenant_id))
+            log_audit(conn, tenant_id, user_id, 'request_unused_ticket_refund', 'unused_ticket', row['id'], {'refund_no': refund_no})
+        return self._json({'ok': True, 'refund_no': refund_no})
+
+    def api_fare_optimization(self, tenant_id, user_id, apply=False):
+        with db() as conn:
+            result = self._auto_optimize_fares(conn, tenant_id, apply=apply)
+            if apply and result.get('updated'):
+                log_audit(conn, tenant_id, user_id, 'optimize_fares', 'pss_flights', None, {'updated': result['updated']})
+        return self._json(result)
+
+    def api_run_automation(self, tenant_id, user_id):
+        with db() as conn:
+            unused = self._sync_unused_tickets(conn, tenant_id)
+            fares = self._auto_optimize_fares(conn, tenant_id, apply=True)
+            log_audit(conn, tenant_id, user_id, 'run_automation', 'system', None,
+                      {'unused_created': unused.get('created'), 'fares_updated': fares.get('updated')})
+        return self._json({'unused_tickets': unused, 'fare_optimization': fares})
+
     def api_setup_resource(self, tenant_id, slug, table, key, rid, method):
         cols = self._setup_columns(table)
         with db() as conn:
@@ -1940,6 +2795,8 @@ class Handler(BaseHTTPRequestHandler):
             available_types = {r['name']: (r['type'] or '').upper() for r in q(conn, f"PRAGMA table_info({table})")}
             vals = {}
             for c in cols:
+                if c not in data:
+                    continue
                 v = data.get(c)
                 if v == '' and any(t in available_types.get(c, '') for t in ('INT', 'REAL', 'FLOAT', 'DOUBLE', 'NUMERIC')):
                     v = None
@@ -1949,11 +2806,26 @@ class Handler(BaseHTTPRequestHandler):
             if table == 'users':
                 sess_obj = require_auth(self)
                 caller_group = role_group(sess_obj.get('role')) if sess_obj else 'airline_admin'
+                current_user = q(conn, "SELECT role,username FROM users WHERE id=? AND tenant_id=?", (rid, tenant_id), one=True) if rid else None
                 password = data.get('password')
                 if password:
                     err = _password_policy_error(password)
                     if err:
                         return self._json({'error': err}, 400)
+                if 'username' in vals:
+                    vals['username'] = str(vals.get('username') or '').strip()
+                username = vals.get('username') or (current_user or {}).get('username') or ''
+                if not username:
+                    return self._json({'error': 'username required'}, 400)
+                duplicate = q(conn, "SELECT id FROM users WHERE tenant_id=? AND username=? AND id<>?",
+                              (tenant_id, username, rid or 0), one=True)
+                if duplicate:
+                    return self._json({'error': 'Username already exists'}, 400)
+                if 'role' in vals:
+                    role = str(vals.get('role') or '').strip().lower()
+                    if role and role not in USER_ROLES and role != (current_user or {}).get('role'):
+                        return self._json({'error': 'Invalid role'}, 400)
+                    vals['role'] = role or ((current_user or {}).get('role') or 'agent')
                 if rid is None:
                     if not password:
                         return self._json({'error': 'password required'}, 400)
@@ -1966,10 +2838,8 @@ class Handler(BaseHTTPRequestHandler):
                         vals['password'] = _hash_password(password)
                     else:
                         vals.pop('password', None)
-                    if caller_group != 'airline_admin':
-                        existing = q(conn, "SELECT role FROM users WHERE id=? AND tenant_id=?", (rid, tenant_id), one=True)
-                        if existing:
-                            vals['role'] = existing['role']
+                    if caller_group != 'airline_admin' and current_user:
+                        vals['role'] = current_user['role']
             elif table == 'integrations':
                 cfg = data.get('config') if isinstance(data.get('config'), dict) else {}
                 old = q(conn, "SELECT config_json FROM integrations WHERE id=? AND tenant_id=?", (rid, tenant_id), one=True) if rid else None
@@ -1979,6 +2849,10 @@ class Handler(BaseHTTPRequestHandler):
                         cfg[k] = json.loads(old['config_json'] or '{}').get(k, '')
                 vals['config_json'] = json.dumps(cfg)
                 vals.pop('config', None)
+            if rid and not vals:
+                if not q(conn, f"SELECT 1 FROM {table} WHERE id=? AND tenant_id=?", (rid, tenant_id), one=True):
+                    return self._json({'error': 'Not found'}, 404)
+                return self._json({'ok': True})
             active_cols = list(vals.keys())
             available = {r['name'] for r in q(conn, f"PRAGMA table_info({table})")}
             ts = now_iso()
@@ -1996,8 +2870,8 @@ class Handler(BaseHTTPRequestHandler):
                     insert_cols.append('created_at'); params.append(ts)
                 if 'updated_at' in available:
                     insert_cols.append('updated_at'); params.append(ts)
-                conn.execute(f"INSERT INTO {table}({','.join(insert_cols)}) VALUES ({','.join(['?']*len(insert_cols))})", params)
-                new_id = q(conn, "SELECT last_insert_rowid() v", (), one=True)['v']
+                cur = conn.execute(f"INSERT INTO {table}({','.join(insert_cols)}) VALUES ({','.join(['?']*len(insert_cols))})", params)
+                new_id = cur.lastrowid
                 return self._json({'ok': True, 'id': new_id})
         return self._json({'ok': True})
 
@@ -2261,6 +3135,82 @@ class Handler(BaseHTTPRequestHandler):
             new_id = self._insert_traveler(conn, tenant_id, data)
         return self._json({'ok': True, 'traveler_id': new_id})
 
+    def api_report_export(self, tenant_id, qs, user_id=None):
+        entity = (qs.get('entity') or qs.get('view') or [''])[0]
+        table = REPORT_SOURCES.get(entity)
+        if not table:
+            return self._json({'error': 'Unsupported report'}, 400)
+        sess = get_session(self) or {}
+        if not _report_allowed(entity, role_group(sess.get('role'))):
+            return self._json({'error': 'Access denied'}, 403)
+        fmt = (qs.get('format') or ['csv'])[0].lower()
+        if fmt not in ('csv', 'xlsx'):
+            return self._json({'error': 'Unsupported format'}, 400)
+        try:
+            limit = max(1, min(int((qs.get('limit') or ['10000'])[0]), 50000))
+        except (TypeError, ValueError):
+            limit = 10000
+        df = (qs.get('from') or qs.get('date_from') or [''])[0].strip()
+        dt = (qs.get('to') or qs.get('date_to') or [''])[0].strip()
+        status = (qs.get('status') or [''])[0].strip()
+        term = (qs.get('q') or [''])[0].strip().lower()
+        with db() as conn:
+            try:
+                info = q(conn, f"PRAGMA table_info({table})")
+            except Exception:
+                return self._json({'error': 'Report source unavailable'}, 404)
+            if not info:
+                return self._json({'error': 'Report source unavailable'}, 404)
+            names = [c['name'] for c in info]
+            if 'tenant_id' not in names:
+                return self._json({'error': 'Report not available'}, 400)
+            cols = [c for c in names if c not in REPORT_EXCLUDE_COLUMNS]
+            where = ['tenant_id=?']
+            params = [tenant_id]
+            date_col = next((c for c in ('created_at', 'issue_date', 'booking_date', 'flight_date',
+                                         'travel_date', 'paid_at', 'departure_at') if c in names), None)
+            if date_col and df:
+                where.append(f'{date_col}>=?')
+                params.append(df)
+            if date_col and dt:
+                where.append(f'{date_col}<=?')
+                params.append(dt + 'T23:59:59.999999')
+            if status and 'status' in names:
+                where.append('status=?')
+                params.append(status)
+            if term:
+                text_cols = [c for c in cols if any(k in c for k in ('name', 'no', 'email', 'phone',
+                                                                      'pnr', 'code', 'number', 'title'))][:8]
+                if text_cols:
+                    where.append('(' + ' OR '.join(f"LOWER(CAST({c} AS TEXT)) LIKE ?" for c in text_cols) + ')')
+                    params.extend([f'%{term}%'] * len(text_cols))
+            order = ''
+            if 'id' in names:
+                order = ' ORDER BY id DESC'
+            elif date_col:
+                order = f' ORDER BY {date_col} DESC'
+            sql = f"SELECT {', '.join(cols)} FROM {table} WHERE {' AND '.join(where)}{order} LIMIT ?"
+            params.append(limit)
+            try:
+                records = q(conn, sql, tuple(params))
+            except Exception:
+                return self._json({'error': 'Report query failed'}, 400)
+        headers = [_report_label(c) for c in cols]
+        rows = [[_report_value(r.get(c)) for c in cols] for r in records]
+        safe = re.sub(r'[^a-z0-9_-]+', '-', entity.lower()).strip('-') or 'report'
+        if fmt == 'xlsx':
+            payload = _build_xlsx(headers, rows)
+            ctype = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        else:
+            buf = io.StringIO(newline='')
+            writer = csv.writer(buf)
+            writer.writerow(headers)
+            writer.writerows(rows)
+            payload = b'\xef\xbb\xbf' + buf.getvalue().encode('utf-8')
+            ctype = 'text/csv; charset=utf-8'
+        return self._send(payload, 200, ctype,
+                          {'Content-Disposition': f'attachment; filename="{safe}-{date.today().isoformat()}.{fmt}"'})
+
     def api_travelers_export(self, tenant_id):
         rows = self._traveler_list_rows(tenant_id)
         cols = ['full_name','display_name','title','first_name','last_name','traveler_type','email','phone','mobile','doc_type','doc_no','doc_issued','doc_expiry','dob','marital_status','gender','nationality','address','city','state','postal_code','country','status','notes','trips','spend','collection','travel_status','next_travel']
@@ -2441,7 +3391,7 @@ class Handler(BaseHTTPRequestHandler):
         eid = self._oid(eid)
         with db() as conn:
             est = q(conn, "SELECT * FROM estimates WHERE id=? AND tenant_id=?", (eid, tenant_id), one=True)
-            if not est:
+            if not est or not self._row_allowed(est, sess):
                 return self._json({'error': 'Estimate not found'}, 404)
             ts = now_iso()
             n = q(conn, "SELECT COUNT(*) c FROM invoices WHERE tenant_id=?", (tenant_id,), one=True)['c'] + 1
@@ -2492,14 +3442,29 @@ class Handler(BaseHTTPRequestHandler):
     def api_credit_note_mutate(self, tenant_id, cid, method, sess=None):
         cid = self._oid(cid)
         with db() as conn:
+            row = q(conn, "SELECT * FROM credit_notes WHERE id=? AND tenant_id=?", (cid, tenant_id), one=True)
+            if not row or not self._row_allowed(row, sess):
+                return self._json({'error': 'Credit note not found'}, 404)
+            if method == 'GET':
+                return self._json({'credit_note': row})
             if method == 'DELETE':
                 conn.execute("DELETE FROM credit_notes WHERE id=? AND tenant_id=?", (cid, tenant_id))
                 conn.execute("DELETE FROM journals WHERE tenant_id=? AND ref_type='credit_note' AND ref_id=?", (tenant_id, cid))
                 return self._json({'ok': True})
             data = read_json(self)
-            conn.execute("""UPDATE credit_notes SET customer_id=?,invoice_id=?,reason=?,description=?,currency=?,amount=?,status=?,issue_date=? WHERE id=? AND tenant_id=?""",
-                         (self._oid(data.get('customer_id')), self._oid(data.get('invoice_id')), data.get('reason'), data.get('description'), data.get('currency'), float(data.get('amount') or 0), data.get('status'), data.get('issue_date'), cid, tenant_id))
-        return self._json({'ok': True})
+            allowed = ('branch_id', 'credit_note_no', 'customer_id', 'invoice_id', 'reason', 'description',
+                       'currency', 'amount', 'status', 'issue_date')
+            sets, args = [], []
+            for key in allowed:
+                if key in data:
+                    sets.append(f"{key}=?")
+                    args.append(self._oid(data[key]) if key.endswith('_id') else data[key])
+            if not sets:
+                return self._json({'credit_note': row})
+            args += [cid, tenant_id]
+            conn.execute(f"UPDATE credit_notes SET {','.join(sets)} WHERE id=? AND tenant_id=?", args)
+            updated = q(conn, "SELECT * FROM credit_notes WHERE id=? AND tenant_id=?", (cid, tenant_id), one=True)
+        return self._json({'ok': True, 'credit_note': updated})
 
     def api_chart_accounts_list(self, tenant_id, sess=None):
         with db() as conn:
@@ -2633,9 +3598,9 @@ class Handler(BaseHTTPRequestHandler):
         with db() as conn:
             n = q(conn, "SELECT COUNT(*) c FROM expenses WHERE tenant_id=?", (tenant_id,), one=True)['c'] + 1
             exp_no = data.get('expense_no') or f"EXP-{ts[:4]}-{n:05d}"
-            cur = conn.execute("""INSERT INTO expenses(tenant_id,branch_id,expense_no,category,vendor,description,account_code,amount,currency,expense_date,status,payment_method,reference,created_by,created_at,updated_at)
-                                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                               (tenant_id, data.get('branch_id'), exp_no, data.get('category') or 'operating', data.get('vendor'), data.get('description'), data.get('account_code') or '1300', amount, data.get('currency') or 'USD', data.get('expense_date') or ts[:10], data.get('status') or 'posted', data.get('payment_method') or 'cash', data.get('reference'), user_id, ts, ts))
+            cur = conn.execute("""INSERT INTO expenses(tenant_id,branch_id,expense_no,category,vendor,description,account_code,amount,currency,expense_date,status,payment_method,reference,receipt_no,agency_id,created_by,created_at,updated_at)
+                                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                               (tenant_id, data.get('branch_id'), exp_no, data.get('category') or 'operating', data.get('vendor'), data.get('description'), data.get('account_code') or '1300', amount, data.get('currency') or 'USD', data.get('expense_date') or ts[:10], data.get('status') or 'posted', data.get('payment_method') or 'cash', data.get('reference'), data.get('receipt_no'), (sess or {}).get('agency_id'), user_id, ts, ts))
             eid = cur.lastrowid
             conn.execute("INSERT INTO journals(tenant_id,ref_type,ref_id,entry_date,memo,debit_account,credit_account,amount,currency,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
                          (tenant_id, 'expense', eid, ts[:10], f"Expense {exp_no}", data.get('account_code') or '1300', 'Petty Cash', amount, data.get('currency') or 'USD', ts))
@@ -2650,8 +3615,14 @@ class Handler(BaseHTTPRequestHandler):
                 conn.execute("DELETE FROM journals WHERE tenant_id=? AND ref_type='expense' AND ref_id=?", (tenant_id, eid))
                 return self._json({'ok': True})
             data = read_json(self)
-            conn.execute("""UPDATE expenses SET category=?,vendor=?,description=?,account_code=?,amount=?,currency=?,expense_date=?,status=?,payment_method=?,reference=?,updated_at=? WHERE id=? AND tenant_id=?""",
-                         (data.get('category'), data.get('vendor'), data.get('description'), data.get('account_code'), float(data.get('amount') or 0), data.get('currency'), data.get('expense_date'), data.get('status'), data.get('payment_method'), data.get('reference'), now_iso(), eid, tenant_id))
+            allowed = ('category', 'vendor', 'description', 'account_code', 'amount', 'currency',
+                       'expense_date', 'status', 'payment_method', 'reference', 'receipt_no')
+            vals = {k: data[k] for k in allowed if k in data}
+            if not vals:
+                return self._json({'ok': True})
+            vals['updated_at'] = now_iso()
+            conn.execute(f"UPDATE expenses SET {','.join(k+'=?' for k in vals)} WHERE id=? AND tenant_id=?",
+                         list(vals.values()) + [eid, tenant_id])
         return self._json({'ok': True})
 
     def api_ledger(self, tenant_id, qs, sess=None):
@@ -2758,7 +3729,7 @@ class Handler(BaseHTTPRequestHandler):
                         VALUES (?,?,?,?,?,?,?)""",
                      (tenant_id, entity_type, entity_id, action, detail, str(actor or 'system'), now_iso()))
 
-    def _entity_context(self, conn, tenant_id, entity_type, entity_id, date_from=None, date_to=None):
+    def _entity_context(self, conn, tenant_id, entity_type, entity_id, date_from=None, date_to=None, bag_index=0):
         eid = self._oid(entity_id)
         if not eid:
             return {}
@@ -2843,39 +3814,56 @@ class Handler(BaseHTTPRequestHandler):
                     'baggage': q(conn, "SELECT cabin_class,free_kg,excess_rate_per_kg,max_kg FROM pss_baggage_rules WHERE tenant_id=? AND (flight_id=? OR flight_id IS NULL) ORDER BY flight_id DESC LIMIT 1", (tenant_id, b.get('flight_id'))),
                     'airport_docs': q(conn, f"SELECT airport_code,doc_type,title,requirement FROM pss_airport_docs WHERE tenant_id=? AND airport_code IN ({marks}) AND status='active' ORDER BY airport_code", adargs) if airports else [],
                     'weather': q(conn, f"SELECT airport_code,condition,temperature_c,wind_kph,advisory FROM pss_weather WHERE tenant_id=? AND airport_code IN ({marks}) ORDER BY airport_code", adargs) if airports else []}
-        if entity_type in ('pss_checkin', 'boardingpass'):
-            ci = q(conn, """SELECT ci.*, f.flight_no, f.origin, f.destination, f.flight_date, f.dep_time, f.gate, f.terminal
+        if entity_type in ('pss_checkin', 'boardingpass', 'upliftcoupon', 'uplift-coupon'):
+            ci = q(conn, """SELECT ci.*, f.flight_no, f.origin, f.destination, f.flight_date, f.dep_time, f.arr_time, f.gate, f.terminal
                              FROM pss_checkins ci LEFT JOIN pss_flights f ON f.id=ci.flight_id
                              WHERE ci.tenant_id=? AND ci.id=?""", (tenant_id, eid), one=True)
             if not ci:
                 return {}
             b = q(conn, "SELECT * FROM pss_bookings WHERE tenant_id=? AND id=?", (tenant_id, ci['booking_id']), one=True) or {}
-            return {'checkin': ci, 'pss_checkin': ci, 'pss_booking': b, 'booking': b}
+            bags = q(conn, "SELECT * FROM pss_baggage_items WHERE tenant_id=? AND checkin_id=? ORDER BY sequence_no, id", (tenant_id, eid))
+            events = q(conn, """SELECT e.*, bg.bag_tag FROM pss_baggage_events e
+                                LEFT JOIN pss_baggage_items bg ON bg.id=e.baggage_id
+                                WHERE e.tenant_id=? AND e.checkin_id=? ORDER BY e.id DESC LIMIT 100""", (tenant_id, eid))
+            uplift_sale = q(conn, """SELECT * FROM pss_ancillary_sales WHERE tenant_id=? AND booking_id=?
+                                     AND (sale_no LIKE 'BAG-%' OR description LIKE 'Baggage %')
+                                     ORDER BY id DESC LIMIT 1""", (tenant_id, ci.get('booking_id')), one=True) or {}
+            return {'checkin': ci, 'pss_checkin': ci, 'pss_booking': b, 'booking': b,
+                    'baggage': bags, 'baggage_events': events, 'bag_index': bag_index, 'uplift_sale': uplift_sale}
         return {}
 
     def api_pdf_document(self, kind, oid, qs):
         allowed = {'booking': 'booking', 'order': 'booking', 'invoice': 'invoice', 'customer': 'customer',
                    'bill': 'bill', 'traveler': 'traveler', 'payment': 'payment', 'receipt': 'payment',
-                   'estimate': 'estimate', 'credit_note': 'credit_note',
-                   'eticket': 'pss_booking', 'boardingpass': 'pss_checkin', 'journeypass': 'pss_booking'}
+                    'estimate': 'estimate', 'credit_note': 'credit_note', 'credit-note': 'credit_note',
+                    'statement': 'customer', 'journey-document': 'pss_booking',
+                      'eticket': 'pss_booking', 'boardingpass': 'pss_checkin', 'journeypass': 'pss_booking',
+                    'baggagetag': 'pss_checkin', 'baggage-tag': 'pss_checkin', 'baggage_tag': 'pss_checkin',
+                    'upliftcoupon': 'pss_checkin', 'uplift-coupon': 'pss_checkin',
+                    'quotation': 'estimate',
+                    'itinerary': 'pss_booking', 'booking-confirmation': 'pss_booking'}
         if kind not in allowed:
             return self._json({'error': 'Unsupported document type'}, 400)
         entity_type = allowed[kind]
+        sess = None
         with db() as conn:
             token = (qs.get('token') or [''])[0]
             if token:
                 share = q(conn, "SELECT * FROM document_shares WHERE token=? AND status='active'", (token,), one=True)
                 if share:
+                    if share.get('expires_at') and str(share['expires_at']) < now_iso():
+                        return self._json({'error': 'Share link expired'}, 410)
                     setype = str(share.get('entity_type') or '')
                     valid = (setype == entity_type or
                              (entity_type == 'booking' and setype == 'order') or
                              (entity_type == 'pss_booking' and setype in ('pss_booking', 'eticket', 'journeypass')) or
-                             (entity_type == 'pss_checkin' and setype in ('pss_checkin', 'boardingpass')))
+                               (entity_type == 'pss_checkin' and setype in ('pss_checkin', 'boardingpass', 'baggagetag', 'baggage-tag', 'baggage_tag', 'upliftcoupon', 'uplift-coupon')))
                     if not valid or str(share.get('entity_id')) != str(oid):
                         return self._json({'error': 'Invalid share token'}, 403)
                     tenant_id = share['tenant_id']
                 else:
-                    offer = q(conn, "SELECT * FROM pss_eticket_directs WHERE token=? AND status='active'", (token,), one=True)
+                    offer = q(conn, "SELECT * FROM pss_eticket_directs WHERE token=? AND status='active' AND (valid_until IS NULL OR valid_until>?)",
+                              (token, now_iso()), one=True)
                     booking = q(conn, "SELECT id,offer_id FROM pss_bookings WHERE id=?", (self._oid(oid),), one=True)
                     if not offer or not booking or str(booking.get('offer_id')) != str(offer['id']) or entity_type != 'pss_booking':
                         return self._json({'error': 'Invalid share token'}, 403)
@@ -2883,24 +3871,88 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 sess = require_auth(self)
                 if not sess:
-                    return self._json({'error': 'Unauthorized'}, 401)
-                tenant_id = sess['tenant_id']
+                    sess = get_portal_session(self)
+                    pnr = (qs.get('pnr') or [''])[0].strip().upper()
+                    last = (qs.get('last_name') or [''])[0].strip().lower()
+                    tcode = (qs.get('tenant') or [''])[0].strip()
+                    if not sess:
+                        if not pnr or not last or entity_type not in ('pss_booking', 'invoice', 'payment'):
+                            return self._json({'error': 'Unauthorized'}, 401)
+                        trow = self._portal_tenant(tcode) if tcode else None
+                        tid = trow['id'] if trow else None
+                        bid = self._oid(oid)
+                        if entity_type == 'invoice':
+                            inv = q(conn, "SELECT tenant_id,pss_booking_id FROM invoices WHERE id=?", (self._oid(oid),), one=True)
+                            if not inv:
+                                return self._json({'error': 'Document not found'}, 404)
+                            tid = tid or inv.get('tenant_id')
+                            bid = inv.get('pss_booking_id')
+                        elif entity_type == 'payment':
+                            pay = q(conn, "SELECT tenant_id,pss_booking_id FROM payments WHERE id=?", (self._oid(oid),), one=True)
+                            if not pay:
+                                return self._json({'error': 'Document not found'}, 404)
+                            tid = tid or pay.get('tenant_id')
+                            bid = pay.get('pss_booking_id')
+                        if not tid or not bid:
+                            return self._json({'error': 'Access denied'}, 403)
+                        trip = q(conn, """SELECT id,passenger_name FROM pss_bookings
+                                          WHERE tenant_id=? AND (pnr=? OR trip_pnr=?)""", (tid, pnr, pnr))
+                        if (not any(self._last_name_matches(x.get('passenger_name'), last) for x in trip)
+                                or not any(str(x['id']) == str(bid) for x in trip)):
+                            return self._json({'error': 'Access denied'}, 403)
+                        tenant_id = tid
+                    else:
+                        tenant_id = sess['tenant_id']
+                        if entity_type not in ('pss_booking', 'pss_checkin', 'invoice', 'payment'):
+                            return self._json({'error': 'Access denied'}, 403)
+                        bid = self._oid(oid)
+                        if entity_type == 'pss_checkin':
+                            ci = q(conn, "SELECT booking_id FROM pss_checkins WHERE id=? AND tenant_id=?", (self._oid(oid), tenant_id), one=True)
+                            bid = ci.get('booking_id') if ci else None
+                        if entity_type == 'invoice':
+                            inv = q(conn, "SELECT pss_booking_id FROM invoices WHERE id=? AND tenant_id=?", (self._oid(oid), tenant_id), one=True)
+                            bid = inv.get('pss_booking_id') if inv else None
+                        if entity_type == 'payment':
+                            pay = q(conn, "SELECT pss_booking_id FROM payments WHERE id=? AND tenant_id=?", (self._oid(oid), tenant_id), one=True)
+                            bid = pay.get('pss_booking_id') if pay else None
+                        if not bid:
+                            return self._json({'error': 'Access denied'}, 403)
+                        booking = q(conn, "SELECT id,passenger_name,portal_customer_id FROM pss_bookings WHERE id=? AND tenant_id=?",
+                                    (bid, tenant_id,), one=True)
+                        allowed = bool(booking and booking.get('portal_customer_id') == sess.get('customer_id'))
+                        if not allowed and booking and last:
+                            allowed = self._last_name_matches(booking.get('passenger_name'), last)
+                        if not allowed:
+                            return self._json({'error': 'Access denied'}, 403)
+                else:
+                    group = role_group(sess.get('role'))
+                    api_allow = ROLE_API.get(group)
+                    if api_allow is not None and not any('/api/documents'.startswith(prefix) for prefix in api_allow):
+                        return self._json({'error': 'Access denied'}, 403)
+                    tenant_id = sess['tenant_id']
             date_from = (qs.get('from') or qs.get('date_from') or [''])[0]
             date_to = (qs.get('to') or qs.get('date_to') or [''])[0]
-            context = self._entity_context(conn, tenant_id, entity_type, oid, date_from, date_to)
+            bag_index = self._oid((qs.get('bag') or [''])[0]) or 0
+            context = self._entity_context(conn, tenant_id, entity_type, oid, date_from, date_to, bag_index)
             if not context:
                 return self._json({'error': 'Document not found'}, 404)
             branding = self._branding(conn, tenant_id)
-        pdf_kind = 'booking' if kind == 'order' else kind
+        pdf_kind = {'order': 'booking', 'itinerary': 'journeypass', 'booking-confirmation': 'journeypass',
+                    'journey-document': 'journeypass', 'statement': 'customer', 'credit-note': 'credit_note',
+                    'baggage-tag': 'baggagetag', 'baggage_tag': 'baggagetag', 'uplift-coupon': 'upliftcoupon',
+                    'quotation': 'estimate'}.get(kind, kind)
         with db() as conn:
             ref = self._psn('DOC')
             subject = context.get('pss_booking') or context.get('checkin') or context.get('invoice') or {}
+            actor = sess.get('username') if sess else 'client'
             self._doc_audit(conn, tenant_id, pdf_kind, ref, subject.get('id'), subject.get('pnr'),
-                            'document_generated', sess.get('username') if sess else 'client',
+                            'document_generated', actor,
                             subject.get('trace_id'), {'kind': pdf_kind})
         pdf = build_pdf(pdf_kind, context, branding)
         name = f"{kind}-{oid}.pdf"
-        return self._send(pdf, 200, 'application/pdf', {'Content-Disposition': f'inline; filename="{name}"'})
+        download = (qs.get('download') or [''])[0].lower() in ('1', 'true', 'yes')
+        disp = 'attachment' if download else 'inline'
+        return self._send(pdf, 200, 'application/pdf', {'Content-Disposition': f'{disp}; filename="{name}"'})
 
     def api_public_share(self, token):
         with db() as conn:
@@ -3019,8 +4071,10 @@ class Handler(BaseHTTPRequestHandler):
         data = read_json(self)
         with db() as conn:
             current = q(conn, "SELECT * FROM tenant_branding WHERE tenant_id=?", (tenant_id,), one=True) or {}
-            logo_data = data.get('logo_data') if 'logo_data' in data else current.get('logo_data')
-            logo_data = logo_data or ''
+            try:
+                logo_data = self._clean_logo_data(data.get('logo_data')) if 'logo_data' in data else (current.get('logo_data') or '')
+            except ValueError as exc:
+                return self._json({'error': str(exc)}, 400)
             def pick(key):
                 if key in data and data.get(key) not in (None, ''):
                     return data.get(key)
@@ -3157,6 +4211,9 @@ class Handler(BaseHTTPRequestHandler):
                 bookings = q(conn, "SELECT * FROM pss_bookings WHERE flight_id=? AND tenant_id=? ORDER BY id DESC", (fid, tenant_id))
                 return self._json({'flight': row, 'bookings': bookings})
             if method == 'DELETE':
+                _, committed = self._inv_counts(conn, tenant_id, fid)
+                if committed:
+                    return self._json({'error': f'Cannot delete flight with {committed} active reservation(s)'}, 400)
                 conn.execute("DELETE FROM pss_flights WHERE id=? AND tenant_id=?", (fid, tenant_id))
                 return self._json({'ok': True})
             data = read_json(self)
@@ -3164,6 +4221,14 @@ class Handler(BaseHTTPRequestHandler):
                 conn.execute("UPDATE pss_flights SET status='cancelled', updated_at=? WHERE id=? AND tenant_id=?", (now_iso(), fid, tenant_id))
                 return self._json({'ok': True})
             fields = ['flight_no','origin','destination','flight_date','dep_time','arr_time','aircraft','total_seats','available_seats','base_fare','currency','gate','terminal','status']
+            total_seats = int(data.get('total_seats') or 0)
+            available_seats = int(data.get('available_seats') or 0)
+            if available_seats < 0 or available_seats > total_seats:
+                return self._json({'error': 'available_seats must be between 0 and total_seats'}, 400)
+            if fid:
+                _, committed = self._inv_counts(conn, tenant_id, fid)
+                if total_seats < committed:
+                    return self._json({'error': f'total_seats cannot be below {committed} active reservation(s)'}, 400)
             vals = [data.get(f) for f in fields]
             if fid:
                 conn.execute("UPDATE pss_flights SET " + ','.join(f + '=?' for f in fields) + ",updated_at=? WHERE id=? AND tenant_id=?", vals + [now_iso(), fid, tenant_id])
@@ -3171,10 +4236,620 @@ class Handler(BaseHTTPRequestHandler):
                 if not data.get('flight_no') or not data.get('origin') or not data.get('destination') or not data.get('flight_date'):
                     return self._json({'error': 'flight_no, origin, destination and flight_date are required'}, 400)
                 vals = [tenant_id] + vals + [now_iso(), now_iso()]
-                conn.execute("INSERT INTO pss_flights(tenant_id," + ','.join(fields) + ",created_at,updated_at) VALUES (" + ','.join(['?'] * (len(fields) + 3)) + ")", vals)
-                fid = q(conn, "SELECT last_insert_rowid() v", (), one=True)['v']
+                cur = conn.execute("INSERT INTO pss_flights(tenant_id," + ','.join(fields) + ",created_at,updated_at) VALUES (" + ','.join(['?'] * (len(fields) + 3)) + ")", vals)
+                fid = cur.lastrowid
             log_audit(conn, tenant_id, None, 'save', 'pss_flight', fid, {})
         return self._json({'ok': True, 'flight_id': fid})
+
+    def api_pss_seat_holds(self, tenant_id):
+        with db() as conn:
+            holds = q(conn, """SELECT b.*, f.flight_no, f.origin, f.destination, f.flight_date, f.dep_time
+                               FROM pss_bookings b LEFT JOIN pss_flights f ON f.id=b.flight_id
+                               WHERE b.tenant_id=? AND b.booking_status='hold' ORDER BY b.id DESC LIMIT 200""", (tenant_id,))
+            flights = q(conn, """SELECT id, flight_no, origin, destination, flight_date, dep_time, available_seats
+                                 FROM pss_flights WHERE tenant_id=? AND LOWER(COALESCE(status,'scheduled'))='scheduled'
+                                 ORDER BY flight_date, dep_time LIMIT 200""", (tenant_id,))
+        return self._json({'holds': holds, 'flights': flights})
+
+    def api_pss_seat_hold_create(self, tenant_id, user_id):
+        data = read_json(self)
+        fid = self._oid(data.get('flight_id'))
+        name = (data.get('passenger_name') or '').strip()
+        if not name:
+            return self._json({'error': 'passenger_name required'}, 400)
+        with db() as conn:
+            self._inv_release_expired(conn, tenant_id, user_id)
+            hold_minutes = self._inv_hold_minutes(conn, tenant_id)
+            hold_expires = (datetime.utcnow() + timedelta(minutes=hold_minutes)).replace(microsecond=0).isoformat() + 'Z'
+            flight = q(conn, "SELECT * FROM pss_flights WHERE id=? AND tenant_id=?", (fid, tenant_id), one=True)
+            if not flight:
+                return self._json({'error': 'Flight not found'}, 404)
+            requested_pnr = (data.get('pnr') or '').strip().upper().replace('-', '').replace(' ', '')[:6]
+            pnr = requested_pnr
+            while True:
+                if not pnr:
+                    pnr = self._psn('').replace('-', '').upper()[:6]
+                if not q(conn, "SELECT 1 FROM pss_bookings WHERE tenant_id=? AND pnr=?", (tenant_id, pnr), one=True):
+                    break
+                if requested_pnr:
+                    return self._json({'error': 'PNR already exists'}, 400)
+                pnr = ''
+            reserved = conn.execute("UPDATE pss_flights SET available_seats=available_seats-1, updated_at=? WHERE id=? AND tenant_id=? AND available_seats>0",
+                                    (now_iso(), fid, tenant_id))
+            if reserved.rowcount < 1:
+                return self._json({'error': 'No seats available on this flight'}, 400)
+            cur = conn.execute("""INSERT INTO pss_bookings(tenant_id,pnr,flight_id,passenger_name,passenger_type,contact_email,contact_phone,channel_id,airport_code,fare_class,fare_amount,taxes,total_amount,currency,ticket_status,payment_status,booking_status,hold_expires_at,seat_no,created_by,created_at,updated_at)
+                                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'unissued','pending','hold',?,?,?,?,?)""",
+                               (tenant_id, pnr, fid, name, data.get('passenger_type') or 'ADT', data.get('contact_email'),
+                                data.get('contact_phone'), self._oid(data.get('channel_id')), data.get('airport_code') or flight.get('origin'),
+                                data.get('fare_class') or 'Y', 0, 0, 0, flight.get('currency') or 'USD', hold_expires,
+                                data.get('seat_no'), user_id, now_iso(), now_iso()))
+            self._trace(conn, tenant_id, 'counter', 'pss_booking', cur.lastrowid, 'seat_held', user_id, pnr, None, self)
+            log_audit(conn, tenant_id, user_id, 'hold_seat', 'pss_booking', cur.lastrowid, {'pnr': pnr, 'flight_id': fid})
+        return self._json({'ok': True, 'id': cur.lastrowid, 'pnr': pnr})
+
+    def api_pss_seat_hold_release(self, tenant_id, user_id, hid):
+        hid = self._oid(hid)
+        with db() as conn:
+            b = q(conn, "SELECT * FROM pss_bookings WHERE id=? AND tenant_id=? AND booking_status='hold'", (hid, tenant_id), one=True)
+            if not b:
+                return self._json({'error': 'Seat hold not found'}, 404)
+            conn.execute("DELETE FROM pss_bookings WHERE id=? AND tenant_id=?", (hid, tenant_id))
+            if b.get('flight_id'):
+                conn.execute("UPDATE pss_flights SET available_seats=available_seats+1, updated_at=? WHERE id=? AND tenant_id=?",
+                             (now_iso(), b['flight_id'], tenant_id))
+            self._trace(conn, tenant_id, 'counter', 'pss_booking', hid, 'seat_released', user_id, b.get('pnr'), None, self)
+            log_audit(conn, tenant_id, user_id, 'release_seat', 'pss_booking', hid, {'pnr': b.get('pnr')})
+        return self._json({'ok': True})
+
+    def _inv_log(self, conn, tenant_id, entity_type, entity_id, action, before, after, actor=None):
+        conn.execute("""INSERT INTO pss_inventory_history
+                        (tenant_id,entity_type,entity_id,action,before_json,after_json,actor,created_at)
+                        VALUES (?,?,?,?,?,?,?,?)""",
+                     (tenant_id, entity_type, str(entity_id or ''), action,
+                      json.dumps(before or {}, default=str), json.dumps(after or {}, default=str),
+                      str(actor or 'system'), now_iso()))
+
+    def _inv_queue(self, conn, tenant_id, issue_type, severity, flight_id, message):
+        existing = q(conn, """SELECT id FROM pss_inventory_queue
+                              WHERE tenant_id=? AND issue_type=? AND flight_id=? AND status='open'""",
+                     (tenant_id, issue_type, flight_id or 0), one=True)
+        if existing:
+            return existing['id']
+        cur = conn.execute("""INSERT INTO pss_inventory_queue
+                              (tenant_id,issue_type,severity,flight_id,message,status,created_at)
+                              VALUES (?,?,?,?,?,'open',?)""",
+                           (tenant_id, issue_type, severity, flight_id or 0, message, now_iso()))
+        return cur.lastrowid
+
+    def _inv_hold_minutes(self, conn, tenant_id):
+        rule = q(conn, """SELECT value FROM pss_inventory_rules
+                          WHERE tenant_id=? AND rule_code='HOLD_EXPIRY' AND status='active'""", (tenant_id,), one=True)
+        try:
+            return max(1, int(float(rule['value'] if rule else 20)))
+        except Exception:
+            return 20
+
+    def _inv_release_expired(self, conn, tenant_id, actor=None):
+        expired = q(conn, """SELECT * FROM pss_bookings
+                             WHERE tenant_id=? AND booking_status='hold' AND hold_expires_at IS NOT NULL
+                             AND hold_expires_at < ?""", (tenant_id, now_iso()))
+        for b in expired:
+            conn.execute("DELETE FROM pss_bookings WHERE id=? AND tenant_id=?", (b['id'], tenant_id))
+            if b.get('flight_id'):
+                conn.execute("UPDATE pss_flights SET available_seats=available_seats+1, updated_at=? WHERE id=? AND tenant_id=?",
+                             (now_iso(), b['flight_id'], tenant_id))
+            self._inv_log(conn, tenant_id, 'pss_booking', b['id'], 'hold_expired_released',
+                          dict(b), {'booking_status': 'released'}, actor or 'system')
+            log_audit(conn, tenant_id, actor, 'inventory_hold_expired', 'pss_booking', b['id'], {'pnr': b.get('pnr')})
+        return len(expired)
+
+    def _inv_baseline(self, conn, tenant_id):
+        flights = q(conn, """SELECT * FROM pss_flights WHERE tenant_id=?
+                             ORDER BY flight_date, dep_time, flight_no""", (tenant_id,))
+        ts = now_iso()
+        for f in flights:
+            leg = q(conn, "SELECT * FROM pss_inventory_legs WHERE tenant_id=? AND flight_id=? ORDER BY leg_no LIMIT 1",
+                    (tenant_id, f['id']), one=True)
+            if not leg:
+                cur = conn.execute("""INSERT INTO pss_inventory_legs
+                                      (tenant_id,flight_id,leg_no,origin,destination,flight_date,dep_time,arr_time,aircraft,status,created_at,updated_at)
+                                      VALUES (?,?,?,?,?,?,?,?,?,'active',?,?)""",
+                                   (tenant_id, f['id'], 1, f['origin'], f['destination'], f['flight_date'],
+                                    f.get('dep_time'), f.get('arr_time'), f.get('aircraft'), ts, ts))
+                leg = {'id': cur.lastrowid}
+            seg = q(conn, "SELECT id FROM pss_inventory_segments WHERE tenant_id=? AND leg_id=? ORDER BY segment_no LIMIT 1",
+                    (tenant_id, leg['id']), one=True)
+            if not seg:
+                conn.execute("""INSERT INTO pss_inventory_segments
+                                (tenant_id,leg_id,segment_no,origin,destination,dep_time,arr_time,cabin,subclass,seats,status,supplementary_info,created_at,updated_at)
+                                VALUES (?,?,?,?,?,?,?,'economy','Y',?, 'active','',?,?)""",
+                             (tenant_id, leg['id'], 1, f['origin'], f['destination'], f.get('dep_time'),
+                              f.get('arr_time'), f.get('total_seats') or 0, ts, ts))
+        return flights
+
+    def _inv_counts(self, conn, tenant_id, flight_id):
+        rows = q(conn, """SELECT booking_status, COUNT(*) n FROM pss_bookings
+                          WHERE tenant_id=? AND flight_id=? GROUP BY booking_status""", (tenant_id, flight_id))
+        counts = {str(r['booking_status'] or 'unknown'): int(r['n'] or 0) for r in rows}
+        committed = sum(v for k, v in counts.items() if k not in ('cancelled', 'refunded', 'void'))
+        return counts, committed
+
+    def _inv_capacity(self, conn, tenant_id, flight):
+        seg = q(conn, """SELECT COALESCE(SUM(seats),0) n FROM pss_inventory_segments
+                         WHERE tenant_id=? AND leg_id IN (SELECT id FROM pss_inventory_legs WHERE tenant_id=? AND flight_id=?)
+                         AND status='active'""", (tenant_id, tenant_id, flight['id']), one=True)
+        return int((seg or {}).get('n') or 0) or int(flight.get('total_seats') or 0)
+
+    def _inv_compute(self, conn, tenant_id, flight, pos, subclass):
+        capacity = self._inv_capacity(conn, tenant_id, flight)
+        params = [tenant_id, flight['id']]
+        sql = """SELECT COUNT(*) n FROM pss_bookings b
+                 LEFT JOIN pss_channels c ON c.id=b.channel_id
+                 WHERE b.tenant_id=? AND b.flight_id=? AND COALESCE(b.booking_status,'confirmed') NOT IN ('cancelled','refunded','void')"""
+        if pos != 'ALL':
+            sql += " AND c.code=?"; params.append(pos)
+        if subclass != 'ALL':
+            sql += " AND b.fare_class=?"; params.append(subclass)
+        committed = int((q(conn, sql, params, one=True) or {}).get('n') or 0)
+        rules = q(conn, """SELECT * FROM pss_inventory_rules
+                           WHERE tenant_id=? AND status='active'
+                           AND (pos='ALL' OR pos=?) AND (subclass='ALL' OR subclass=?)""",
+                  (tenant_id, pos, subclass))
+        cap = capacity
+        for r in rules:
+            try:
+                value = float(r.get('value') or 0)
+            except Exception:
+                value = 0
+            rtype = str(r.get('rule_type') or '')
+            if rtype == 'limit' and value > 0:
+                cap = min(cap, int(value))
+            elif rtype == 'gate' and value > 0:
+                threshold = value / 100 if value > 1 else value
+                if capacity and committed / capacity >= threshold:
+                    cap = min(cap, committed)
+            elif rtype == 'pos_subclass' and value > 0:
+                cap = max(0, cap - int(value))
+            if r.get('tia_enabled') and r.get('tia_percent'):
+                cap += int(capacity * float(r['tia_percent']) / 100)
+        available = max(0, int(cap) - committed)
+        return {'capacity': int(capacity), 'adjusted_capacity': int(cap), 'committed': committed, 'available': available}
+
+    def _inv_publish(self, conn, tenant_id, actor=None):
+        flights = self._inv_baseline(conn, tenant_id)
+        channels = ['ALL'] + [str(r['code']) for r in q(conn, "SELECT code FROM pss_channels WHERE tenant_id=? AND status='active'", (tenant_id,))]
+        subclasses = ['ALL', 'Y', 'J', 'F']
+        published = 0
+        ts = now_iso()
+        for f in flights:
+            legs = q(conn, "SELECT id FROM pss_inventory_legs WHERE tenant_id=? AND flight_id=?", (tenant_id, f['id']))
+            segs = q(conn, """SELECT id FROM pss_inventory_segments
+                              WHERE tenant_id=? AND leg_id IN (SELECT id FROM pss_inventory_legs WHERE tenant_id=? AND flight_id=?)""",
+                     (tenant_id, tenant_id, f['id']))
+            for pos in channels:
+                for subclass in subclasses:
+                    values = self._inv_compute(conn, tenant_id, f, pos, subclass)
+                    for sid in ([0] + [int(s['id']) for s in segs]) if segs else [0]:
+                        existing = q(conn, """SELECT id,version FROM pss_inventory_availability
+                                              WHERE tenant_id=? AND flight_id=? AND segment_id=? AND pos=? AND pos_subclass=?""",
+                                     (tenant_id, f['id'], sid, pos, subclass), one=True)
+                        if existing:
+                            conn.execute("""UPDATE pss_inventory_availability
+                                            SET leg_id=?,available=?,capacity=?,committed=?,published_at=?,version=version+1,updated_at=?
+                                            WHERE id=?""",
+                                         (int(legs[0]['id']) if legs else 0, values['available'], values['adjusted_capacity'],
+                                          values['committed'], ts, ts, existing['id']))
+                        else:
+                            conn.execute("""INSERT INTO pss_inventory_availability
+                                            (tenant_id,flight_id,leg_id,segment_id,pos,pos_subclass,available,capacity,committed,published_at,version,created_at,updated_at)
+                                            VALUES (?,?,?,?,?,?,?,?,?,?,1,?,?)""",
+                                         (tenant_id, f['id'], int(legs[0]['id']) if legs else 0, sid, pos, subclass,
+                                          values['available'], values['adjusted_capacity'], values['committed'], ts, ts, ts))
+                        published += 1
+        if actor:
+            self._inv_log(conn, tenant_id, 'availability', 'ALL', 'published', {}, {'rows': published}, actor)
+        return published
+
+    def api_inventory_dates(self, tenant_id, user_id):
+        with db() as conn:
+            self._inv_release_expired(conn, tenant_id, user_id)
+            flights = self._inv_baseline(conn, tenant_id)
+            output = []
+            dates = []
+            for f in flights:
+                counts, committed = self._inv_counts(conn, tenant_id, f['id'])
+                capacity = self._inv_capacity(conn, tenant_id, f)
+                legs = q(conn, "SELECT * FROM pss_inventory_legs WHERE tenant_id=? AND flight_id=? ORDER BY leg_no", (tenant_id, f['id']))
+                segs = q(conn, """SELECT s.*, l.leg_no FROM pss_inventory_segments s
+                                  JOIN pss_inventory_legs l ON l.id=s.leg_id
+                                  WHERE s.tenant_id=? AND l.flight_id=? ORDER BY l.leg_no, s.segment_no""", (tenant_id, f['id']))
+                row = dict(f)
+                row['reservation_counts'] = counts
+                row['reservation_committed'] = committed
+                row['reservation_holds'] = counts.get('hold', 0)
+                row['capacity'] = capacity
+                row['overbooked'] = committed > capacity or int(f.get('available_seats') or 0) < 0
+                row['legs'] = legs
+                row['segments'] = segs
+                output.append(row)
+                if f.get('flight_date') not in dates:
+                    dates.append(f.get('flight_date'))
+        return self._json({'dates': dates, 'flights': output, 'flight_date': (dates[0] if dates else '')})
+
+    def api_inventory_legs(self, tenant_id, user_id, method, rid=None):
+        data = read_json(self) if method in ('POST', 'PUT') else {}
+        rid = self._oid(rid)
+        with db() as conn:
+            current = q(conn, "SELECT * FROM pss_inventory_legs WHERE id=? AND tenant_id=?", (rid, tenant_id), one=True) if rid else None
+            if method == 'DELETE':
+                if not current:
+                    return self._json({'error': 'Leg not found'}, 404)
+                conn.execute("DELETE FROM pss_inventory_segments WHERE tenant_id=? AND leg_id=?", (tenant_id, rid))
+                conn.execute("DELETE FROM pss_inventory_legs WHERE id=? AND tenant_id=?", (rid, tenant_id))
+                self._inv_log(conn, tenant_id, 'leg', rid, 'deleted', dict(current), {}, user_id)
+                log_audit(conn, tenant_id, user_id, 'inventory_leg_deleted', 'pss_inventory_legs', rid, {})
+                return self._json({'ok': True})
+            if not data.get('flight_id') or not data.get('origin') or not data.get('destination'):
+                return self._json({'error': 'flight_id, origin and destination are required'}, 400)
+            fid = self._oid(data.get('flight_id'))
+            try:
+                leg_no = int(data.get('leg_no') or 0)
+            except Exception:
+                leg_no = 0
+            if leg_no <= 0:
+                leg_no = (q(conn, "SELECT COALESCE(MAX(leg_no),0)+1 n FROM pss_inventory_legs WHERE tenant_id=? AND flight_id=?",
+                            (tenant_id, fid), one=True) or {}).get('n', 1)
+            duplicate = q(conn, "SELECT id FROM pss_inventory_legs WHERE tenant_id=? AND flight_id=? AND leg_no=? AND id<>?",
+                          (tenant_id, fid, leg_no, rid or 0), one=True)
+            if duplicate:
+                return self._json({'error': f'Leg {leg_no} already exists for this flight'}, 400)
+            values = (tenant_id, fid, leg_no,
+                      str(data.get('origin') or '').upper(), str(data.get('destination') or '').upper(),
+                      data.get('flight_date'), data.get('dep_time'), data.get('arr_time'), data.get('aircraft'),
+                      data.get('status') or 'active', now_iso())
+            if current:
+                conn.execute("""UPDATE pss_inventory_legs SET flight_id=?,leg_no=?,origin=?,destination=?,flight_date=?,dep_time=?,arr_time=?,aircraft=?,status=?,updated_at=?
+                                WHERE id=? AND tenant_id=?""", values[1:] + (rid, tenant_id))
+                self._inv_log(conn, tenant_id, 'leg', rid, 'updated', dict(current), data, user_id)
+            else:
+                cur = conn.execute("""INSERT INTO pss_inventory_legs
+                                      (tenant_id,flight_id,leg_no,origin,destination,flight_date,dep_time,arr_time,aircraft,status,created_at,updated_at)
+                                      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", values + (now_iso(),))
+                rid = cur.lastrowid
+                self._inv_log(conn, tenant_id, 'leg', rid, 'created', {}, data, user_id)
+            log_audit(conn, tenant_id, user_id, 'inventory_leg_saved', 'pss_inventory_legs', rid, data)
+        return self._json({'ok': True, 'id': rid})
+
+    def api_inventory_segments(self, tenant_id, user_id, method, rid=None):
+        data = read_json(self) if method in ('POST', 'PUT') else {}
+        rid = self._oid(rid)
+        with db() as conn:
+            current = q(conn, "SELECT * FROM pss_inventory_segments WHERE id=? AND tenant_id=?", (rid, tenant_id), one=True) if rid else None
+            if method == 'DELETE':
+                if not current:
+                    return self._json({'error': 'Segment not found'}, 404)
+                conn.execute("DELETE FROM pss_inventory_segments WHERE id=? AND tenant_id=?", (rid, tenant_id))
+                self._inv_log(conn, tenant_id, 'segment', rid, 'deleted', dict(current), {}, user_id)
+                log_audit(conn, tenant_id, user_id, 'inventory_segment_deleted', 'pss_inventory_segments', rid, {})
+                return self._json({'ok': True})
+            if not data.get('leg_id') or not data.get('origin') or not data.get('destination'):
+                return self._json({'error': 'leg_id, origin and destination are required'}, 400)
+            lid = self._oid(data.get('leg_id'))
+            try:
+                segment_no = int(data.get('segment_no') or 0)
+            except Exception:
+                segment_no = 0
+            if segment_no <= 0:
+                segment_no = (q(conn, "SELECT COALESCE(MAX(segment_no),0)+1 n FROM pss_inventory_segments WHERE tenant_id=? AND leg_id=?",
+                                (tenant_id, lid), one=True) or {}).get('n', 1)
+            duplicate = q(conn, "SELECT id FROM pss_inventory_segments WHERE tenant_id=? AND leg_id=? AND segment_no=? AND id<>?",
+                          (tenant_id, lid, segment_no, rid or 0), one=True)
+            if duplicate:
+                return self._json({'error': f'Segment {segment_no} already exists for this leg'}, 400)
+            try:
+                seats = int(data.get('seats') or 0)
+            except Exception:
+                seats = 0
+            values = (tenant_id, lid, segment_no,
+                      str(data.get('origin') or '').upper(), str(data.get('destination') or '').upper(),
+                      data.get('dep_time'), data.get('arr_time'), data.get('cabin') or 'economy',
+                      str(data.get('subclass') or 'Y').upper(), seats,
+                      data.get('status') or 'active', data.get('supplementary_info') or '', now_iso())
+            if current:
+                conn.execute("""UPDATE pss_inventory_segments SET leg_id=?,segment_no=?,origin=?,destination=?,dep_time=?,arr_time=?,cabin=?,subclass=?,seats=?,status=?,supplementary_info=?,updated_at=?
+                                WHERE id=? AND tenant_id=?""", values[1:] + (rid, tenant_id))
+                self._inv_log(conn, tenant_id, 'segment', rid, 'updated', dict(current), data, user_id)
+            else:
+                cur = conn.execute("""INSERT INTO pss_inventory_segments
+                                      (tenant_id,leg_id,segment_no,origin,destination,dep_time,arr_time,cabin,subclass,seats,status,supplementary_info,created_at,updated_at)
+                                      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", values + (now_iso(),))
+                rid = cur.lastrowid
+                self._inv_log(conn, tenant_id, 'segment', rid, 'created', {}, data, user_id)
+            log_audit(conn, tenant_id, user_id, 'inventory_segment_saved', 'pss_inventory_segments', rid, data)
+        return self._json({'ok': True, 'id': rid})
+
+    def api_inventory_availability(self, tenant_id, qs):
+        pos = (qs.get('pos') or ['ALL'])[0]
+        subclass = (qs.get('subclass') or ['ALL'])[0]
+        with db() as conn:
+            rows = q(conn, """SELECT a.*, f.flight_no, f.origin, f.destination, f.flight_date
+                              FROM pss_inventory_availability a JOIN pss_flights f ON f.id=a.flight_id
+                              WHERE a.tenant_id=? AND (a.pos=? OR a.pos='ALL') AND (a.pos_subclass=? OR a.pos_subclass='ALL')
+                              ORDER BY f.flight_date, f.flight_no, a.pos, a.pos_subclass LIMIT 500""",
+                     (tenant_id, pos, subclass))
+            if not rows:
+                self._inv_publish(conn, tenant_id)
+                rows = q(conn, """SELECT a.*, f.flight_no, f.origin, f.destination, f.flight_date
+                                  FROM pss_inventory_availability a JOIN pss_flights f ON f.id=a.flight_id
+                                  WHERE a.tenant_id=? AND (a.pos=? OR a.pos='ALL') AND (a.pos_subclass=? OR a.pos_subclass='ALL')
+                                  ORDER BY f.flight_date, f.flight_no, a.pos, a.pos_subclass LIMIT 500""",
+                         (tenant_id, pos, subclass))
+        return self._json({'availability': rows, 'pos': pos, 'subclass': subclass,
+                           'poll_key': max([str(r.get('published_at') or '') for r in rows] or [''])})
+
+    def api_inventory_availability_publish(self, tenant_id, user_id):
+        with db() as conn:
+            count = self._inv_publish(conn, tenant_id, user_id)
+        return self._json({'ok': True, 'published': count})
+
+    def api_inventory_rules(self, tenant_id, user_id=None, method='GET', rid=None):
+        data = read_json(self) if method in ('POST', 'PUT') else {}
+        rid = self._oid(rid)
+        with db() as conn:
+            if method == 'GET':
+                return self._json({'rules': q(conn, "SELECT * FROM pss_inventory_rules WHERE tenant_id=? ORDER BY rule_code", (tenant_id,))})
+            current = q(conn, "SELECT * FROM pss_inventory_rules WHERE id=? AND tenant_id=?", (rid, tenant_id), one=True) if rid else None
+            if method == 'DELETE':
+                if not current:
+                    return self._json({'error': 'Rule not found'}, 404)
+                conn.execute("DELETE FROM pss_inventory_rules WHERE id=? AND tenant_id=?", (rid, tenant_id))
+                self._inv_log(conn, tenant_id, 'rule', rid, 'deleted', dict(current), {}, user_id)
+                return self._json({'ok': True})
+            if not data.get('rule_code') or not data.get('rule_name'):
+                return self._json({'error': 'rule_code and rule_name are required'}, 400)
+            values = (tenant_id, str(data.get('rule_code') or '').upper(), data.get('rule_name'),
+                      data.get('rule_type') or 'limit', data.get('pos') or 'ALL', data.get('subclass') or 'ALL',
+                      float(data.get('value') or 0), 1 if data.get('tia_enabled') else 0,
+                      float(data.get('tia_percent') or 0), data.get('status') or 'active',
+                      data.get('effective_from'), data.get('effective_to'), now_iso())
+            if current:
+                conn.execute("""UPDATE pss_inventory_rules SET rule_code=?,rule_name=?,rule_type=?,pos=?,subclass=?,value=?,tia_enabled=?,tia_percent=?,status=?,effective_from=?,effective_to=?,updated_at=?
+                                WHERE id=? AND tenant_id=?""", values[1:] + (rid, tenant_id))
+                self._inv_log(conn, tenant_id, 'rule', rid, 'updated', dict(current), data, user_id)
+            else:
+                cur = conn.execute("""INSERT INTO pss_inventory_rules
+                                      (tenant_id,rule_code,rule_name,rule_type,pos,subclass,value,tia_enabled,tia_percent,status,effective_from,effective_to,created_at,updated_at)
+                                      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", values + (now_iso(),))
+                rid = cur.lastrowid
+                self._inv_log(conn, tenant_id, 'rule', rid, 'created', {}, data, user_id)
+            log_audit(conn, tenant_id, user_id, 'inventory_rule_saved', 'pss_inventory_rules', rid, data)
+        return self._json({'ok': True, 'id': rid})
+
+    def api_inventory_mass_update(self, tenant_id, user_id):
+        data = read_json(self)
+        ids = data.get('flight_ids') or []
+        if isinstance(ids, str):
+            ids = [x for x in ids.split(',') if x.strip()]
+        ids = [self._oid(x) for x in ids if self._oid(x)]
+        with db() as conn:
+            if not ids:
+                ids = [int(r['id']) for r in q(conn, "SELECT id FROM pss_flights WHERE tenant_id=?", (tenant_id,))]
+            preview = []
+            changed = 0
+            for fid in ids:
+                f = q(conn, "SELECT * FROM pss_flights WHERE id=? AND tenant_id=?", (fid, tenant_id), one=True)
+                if not f:
+                    continue
+                _, committed = self._inv_counts(conn, tenant_id, fid)
+                after = dict(f)
+                if 'available_seats' in data:
+                    after['available_seats'] = int(data.get('available_seats') or 0)
+                if data.get('status'):
+                    after['status'] = data['status']
+                if data.get('gate'):
+                    after['gate'] = data['gate']
+                if data.get('base_fare') not in (None, ''):
+                    after['base_fare'] = float(data['base_fare'])
+                    after['base_fare_reference'] = after['base_fare_reference'] or after['base_fare']
+                preview.append({'flight_id': fid, 'flight_no': f['flight_no'], 'committed': committed,
+                                'before': {k: f.get(k) for k in ('available_seats', 'status', 'gate', 'base_fare')},
+                                'after': {k: after.get(k) for k in ('available_seats', 'status', 'gate', 'base_fare')}})
+                if data.get('preview'):
+                    continue
+                conn.execute("""UPDATE pss_flights SET available_seats=?,status=?,gate=?,base_fare=?,base_fare_reference=?,updated_at=?
+                                WHERE id=? AND tenant_id=?""",
+                             (after.get('available_seats') or 0, after.get('status') or 'scheduled', after.get('gate'),
+                              after.get('base_fare') or 0, after.get('base_fare_reference'), now_iso(), fid, tenant_id))
+                self._inv_log(conn, tenant_id, 'flight', fid, 'mass_updated', dict(f), after, user_id)
+                changed += 1
+                if int(after.get('available_seats') or 0) < 0 or committed > int(f.get('total_seats') or 0):
+                    self._inv_queue(conn, tenant_id, 'overbooking', 'critical', fid,
+                                    f"{f['flight_no']} has {committed} committed against {f.get('total_seats') or 0} seats")
+        return self._json({'preview': preview, 'changed': changed})
+
+    def api_inventory_overbooking(self, tenant_id):
+        rows = []
+        with db() as conn:
+            for f in q(conn, "SELECT * FROM pss_flights WHERE tenant_id=? ORDER BY flight_date", (tenant_id,)):
+                counts, committed = self._inv_counts(conn, tenant_id, f['id'])
+                capacity = self._inv_capacity(conn, tenant_id, f)
+                if committed > capacity or int(f.get('available_seats') or 0) < 0:
+                    rows.append({'flight_id': f['id'], 'flight_no': f['flight_no'], 'flight_date': f['flight_date'],
+                                 'capacity': capacity, 'committed': committed, 'available_seats': f.get('available_seats'),
+                                 'excess': max(0, committed - capacity), 'counts': counts})
+        return self._json({'overbookings': rows})
+
+    def api_inventory_overbooking_resolve(self, tenant_id, user_id):
+        data = read_json(self)
+        fid = self._oid(data.get('flight_id'))
+        with db() as conn:
+            f = q(conn, "SELECT * FROM pss_flights WHERE id=? AND tenant_id=?", (fid, tenant_id), one=True)
+            if not f:
+                return self._json({'error': 'Flight not found'}, 404)
+            _, committed = self._inv_counts(conn, tenant_id, fid)
+            new_total = max(int(f.get('total_seats') or 0), committed)
+            conn.execute("UPDATE pss_flights SET total_seats=?,available_seats=?,updated_at=? WHERE id=? AND tenant_id=?",
+                         (new_total, max(0, new_total - committed), now_iso(), fid, tenant_id))
+            self._inv_baseline(conn, tenant_id)
+            conn.execute("""UPDATE pss_inventory_segments SET seats=?,updated_at=?
+                            WHERE tenant_id=? AND status='active' AND leg_id IN
+                            (SELECT id FROM pss_inventory_legs WHERE tenant_id=? AND flight_id=?)""",
+                         (new_total, now_iso(), tenant_id, tenant_id, fid))
+            conn.execute("""UPDATE pss_inventory_queue SET status='resolved',resolved_at=?
+                            WHERE tenant_id=? AND flight_id=? AND issue_type='overbooking' AND status='open'""",
+                         (now_iso(), tenant_id, fid))
+            self._inv_log(conn, tenant_id, 'flight', fid, 'overbooking_resolved', dict(f),
+                          {'total_seats': new_total, 'available_seats': max(0, new_total - committed)}, user_id)
+            log_audit(conn, tenant_id, user_id, 'inventory_overbooking_resolved', 'pss_flight', fid, {'committed': committed})
+        return self._json({'ok': True, 'committed': committed})
+
+    def api_inventory_history(self, tenant_id):
+        with db() as conn:
+            rows = q(conn, """SELECT * FROM pss_inventory_history WHERE tenant_id=?
+                              ORDER BY id DESC LIMIT 300""", (tenant_id,))
+        return self._json({'history': rows})
+
+    def api_inventory_queue(self, tenant_id):
+        with db() as conn:
+            rows = q(conn, """SELECT q.*, f.flight_no FROM pss_inventory_queue q
+                              LEFT JOIN pss_flights f ON f.id=q.flight_id
+                              WHERE q.tenant_id=? ORDER BY q.id DESC LIMIT 300""", (tenant_id,))
+        return self._json({'queue': rows})
+
+    def api_inventory_queue_resolve(self, tenant_id, user_id, rid):
+        rid = self._oid(rid)
+        with db() as conn:
+            row = q(conn, "SELECT * FROM pss_inventory_queue WHERE id=? AND tenant_id=?", (rid, tenant_id), one=True)
+            if not row:
+                return self._json({'error': 'Queue item not found'}, 404)
+            conn.execute("UPDATE pss_inventory_queue SET status='resolved',resolved_at=? WHERE id=? AND tenant_id=?",
+                         (now_iso(), rid, tenant_id))
+            self._inv_log(conn, tenant_id, 'queue', rid, 'resolved', dict(row), {'status': 'resolved'}, user_id)
+        return self._json({'ok': True})
+
+    def api_inventory_valuation(self, tenant_id, user_id=None, method='GET', rid=None):
+        if method == 'GET':
+            with db() as conn:
+                stored = q(conn, """SELECT v.*, f.flight_no, f.origin, f.destination, f.flight_date
+                                    FROM pss_inventory_valuation v JOIN pss_flights f ON f.id=v.flight_id
+                                    WHERE v.tenant_id=? ORDER BY f.flight_date, f.flight_no""", (tenant_id,))
+                computed = []
+                for f in self._inv_baseline(conn, tenant_id):
+                    _, committed = self._inv_counts(conn, tenant_id, f['id'])
+                    load = committed / max(1, int(f.get('total_seats') or 0))
+                    computed.append({'flight_id': f['id'], 'flight_no': f['flight_no'], 'flight_date': f['flight_date'],
+                                     'committed': committed, 'load_factor': round(load, 3),
+                                     'valuation': round(float(f.get('base_fare') or 0) * committed * (1 + load), 2)})
+            return self._json({'valuations': stored, 'computed': computed})
+        data = read_json(self)
+        rid = self._oid(rid)
+        with db() as conn:
+            if method == 'DELETE':
+                conn.execute("DELETE FROM pss_inventory_valuation WHERE id=? AND tenant_id=?", (rid, tenant_id))
+                self._inv_log(conn, tenant_id, 'valuation', rid, 'deleted', {}, {}, user_id)
+                return self._json({'ok': True})
+            if method == 'PUT':
+                current = q(conn, "SELECT * FROM pss_inventory_valuation WHERE id=? AND tenant_id=?", (rid, tenant_id), one=True)
+                if not current:
+                    return self._json({'error': 'Valuation not found'}, 404)
+                existing = {'id': current['id']}
+                key = (tenant_id, current['flight_id'], current['segment_id'], current['pos'], current['subclass'])
+            else:
+                if not data.get('flight_id'):
+                    return self._json({'error': 'flight_id required'}, 400)
+                key = (tenant_id, self._oid(data.get('flight_id')), self._oid(data.get('segment_id')) or 0,
+                       data.get('pos') or 'ALL', data.get('subclass') or 'ALL')
+                existing = q(conn, """SELECT id FROM pss_inventory_valuation
+                                      WHERE tenant_id=? AND flight_id=? AND segment_id=? AND pos=? AND subclass=?""", key, one=True)
+            values = (float(data.get('valuation') or 0), 1 if data.get('active', True) else 0, now_iso())
+            if existing:
+                conn.execute("""UPDATE pss_inventory_valuation SET valuation=?,active=?,updated_at=? WHERE id=?""", values + (existing['id'],))
+                rid = existing['id']
+            else:
+                cur = conn.execute("""INSERT INTO pss_inventory_valuation
+                                      (tenant_id,flight_id,segment_id,pos,subclass,valuation,active,updated_at)
+                                      VALUES (?,?,?,?,?,?,?,?)""", key + values)
+                rid = cur.lastrowid
+            self._inv_log(conn, tenant_id, 'valuation', rid, 'saved', {}, data, user_id)
+        return self._json({'ok': True, 'id': rid})
+
+    def api_inventory_uncommitted(self, tenant_id, user_id):
+        with db() as conn:
+            released = self._inv_release_expired(conn, tenant_id, user_id)
+            hold_minutes = self._inv_hold_minutes(conn, tenant_id)
+            rows = q(conn, """SELECT b.*, f.flight_no, f.origin, f.destination, f.flight_date, c.code pos
+                              FROM pss_bookings b LEFT JOIN pss_flights f ON f.id=b.flight_id
+                              LEFT JOIN pss_channels c ON c.id=b.channel_id
+                              WHERE b.tenant_id=? AND b.booking_status='hold' ORDER BY b.hold_expires_at, b.id""", (tenant_id,))
+        return self._json({'holds': rows, 'hold_minutes': hold_minutes, 'expired_released': released})
+
+    def api_inventory_uncommitted_action(self, tenant_id, user_id, rid, action):
+        rid = self._oid(rid)
+        with db() as conn:
+            b = q(conn, "SELECT * FROM pss_bookings WHERE id=? AND tenant_id=? AND booking_status='hold'", (rid, tenant_id), one=True)
+            if not b:
+                return self._json({'error': 'Uncommitted booking not found'}, 404)
+            if action == 'release':
+                conn.execute("DELETE FROM pss_bookings WHERE id=? AND tenant_id=?", (rid, tenant_id))
+                if b.get('flight_id'):
+                    conn.execute("UPDATE pss_flights SET available_seats=available_seats+1,updated_at=? WHERE id=? AND tenant_id=?",
+                                 (now_iso(), b['flight_id'], tenant_id))
+                self._inv_log(conn, tenant_id, 'pss_booking', rid, 'hold_released', dict(b), {}, user_id)
+                self._trace(conn, tenant_id, 'counter', 'pss_booking', rid, 'hold_released', user_id, b.get('pnr'), None, self)
+            else:
+                conn.execute("""UPDATE pss_bookings SET booking_status='confirmed',hold_expires_at=NULL,updated_at=?
+                                WHERE id=? AND tenant_id=?""", (now_iso(), rid, tenant_id))
+                self._inv_log(conn, tenant_id, 'pss_booking', rid, 'hold_confirmed', dict(b),
+                              {'booking_status': 'confirmed'}, user_id)
+                self._trace(conn, tenant_id, 'counter', 'pss_booking', rid, 'hold_confirmed', user_id, b.get('pnr'), None, self)
+            log_audit(conn, tenant_id, user_id, 'inventory_hold_' + action, 'pss_booking', rid, {'pnr': b.get('pnr')})
+        return self._json({'ok': True})
+
+    def api_inventory_market(self, tenant_id):
+        with db() as conn:
+            live = q(conn, """SELECT f.origin, f.destination, f.flight_date, COUNT(DISTINCT f.id) flights,
+                                     COUNT(b.id) bookings, COALESCE(SUM(b.total_amount),0) revenue
+                              FROM pss_flights f LEFT JOIN pss_bookings b ON b.flight_id=f.id AND b.tenant_id=f.tenant_id
+                              WHERE f.tenant_id=?
+                              GROUP BY f.origin,f.destination,f.flight_date ORDER BY f.flight_date DESC""", (tenant_id,))
+            stored = q(conn, "SELECT * FROM pss_inventory_market WHERE tenant_id=? ORDER BY flight_date DESC", (tenant_id,))
+        return self._json({'live': live, 'market': stored})
+
+    def api_inventory_market_refresh(self, tenant_id):
+        with db() as conn:
+            rows = q(conn, """SELECT f.origin, f.destination, f.flight_date, COUNT(b.id) bookings,
+                                     COALESCE(SUM(b.total_amount),0) revenue
+                              FROM pss_flights f LEFT JOIN pss_bookings b ON b.flight_id=f.id AND b.tenant_id=f.tenant_id
+                              WHERE f.tenant_id=? GROUP BY f.origin,f.destination,f.flight_date""", (tenant_id,))
+            ts = now_iso()
+            for r in rows:
+                market = f"{r['origin']}-{r['destination']}"
+                existing = q(conn, """SELECT id FROM pss_inventory_market
+                                      WHERE tenant_id=? AND market=? AND pos='ALL' AND flight_date=?""",
+                             (tenant_id, market, r['flight_date']), one=True)
+                demand = int(r['bookings'] or 0) * 2
+                if existing:
+                    conn.execute("UPDATE pss_inventory_market SET demand=?,bookings=?,revenue=?,updated_at=? WHERE id=?",
+                                 (demand, r['bookings'] or 0, r['revenue'] or 0, ts, existing['id']))
+                else:
+                    conn.execute("""INSERT INTO pss_inventory_market
+                                    (tenant_id,market,pos,origin,destination,flight_date,demand,bookings,revenue,updated_at)
+                                    VALUES (?,?,'ALL',?,?,?,?,?,?,?)""",
+                                 (tenant_id, market, r['origin'], r['destination'], r['flight_date'],
+                                  demand, r['bookings'] or 0, r['revenue'] or 0, ts))
+        return self._json({'ok': True, 'refreshed': len(rows)})
+
+    def api_inventory_help(self):
+        return self._json({'articles': [
+            {'title': 'Flight date inventory', 'body': 'Open Flight Inventory, choose a flight date tab, then inspect legs, segments, reservation impact and capacity.'},
+            {'title': 'Leg and Segment controls', 'body': 'Use Legs and Segments tabs to add, edit or delete itinerary structure. Segment seats drive availability capacity.'},
+            {'title': 'Availability and POS', 'body': 'Choose Point of Sale and subclass, then Publish availability. The screen polls every 15 seconds for the latest published version.'},
+            {'title': 'Business rules and TIA', 'body': 'Rules support limit, gate and pos_subclass logic. TIA applies a temporary inventory adjustment percentage.'},
+            {'title': 'Overbooking', 'body': 'The Overbooking tab lists flights where committed reservations exceed capacity. Resolve raises capacity and closes the queue item.'},
+            {'title': 'Uncommitted bookings', 'body': 'Holds expire automatically when accessed after expiry. Confirm converts a hold to a reservation; release restores one seat.'},
+            {'title': 'Self-service support', 'body': 'Use this Help tab first. If an action fails, copy the error path shown in the toast and search the README or ask your administrator.'}
+        ]})
 
     def api_pss_bookings(self, tenant_id, method, bid=None, user_id=None, sess=None):
         with db() as conn:
@@ -3198,6 +4873,12 @@ class Handler(BaseHTTPRequestHandler):
                 if not own:
                     return self._json({'error': 'Booking not found'}, 404)
             if method == 'DELETE':
+                old = q(conn, "SELECT * FROM pss_bookings WHERE id=? AND tenant_id=?", (bid, tenant_id), one=True)
+                if not old:
+                    return self._json({'error': 'Booking not found'}, 404)
+                if old.get('flight_id') and str(old.get('booking_status') or '') not in ('cancelled', 'refunded', 'void'):
+                    conn.execute("UPDATE pss_flights SET available_seats=available_seats+1,updated_at=? WHERE id=? AND tenant_id=?",
+                                 (now_iso(), old['flight_id'], tenant_id))
                 conn.execute("DELETE FROM pss_bookings WHERE id=? AND tenant_id=?", (bid, tenant_id))
                 return self._json({'ok': True})
             data = read_json(self)
@@ -3291,9 +4972,9 @@ class Handler(BaseHTTPRequestHandler):
             log_audit(conn, tenant_id, user_id, 'issue_ticket', 'pss_booking', bid, {'ticket_number': ticket})
         return self._json({'ok': True, 'ticket_number': ticket})
 
-    def api_pss_booking_checkin(self, tenant_id, user_id, bid, sess=None):
+    def api_pss_booking_checkin(self, tenant_id, user_id, bid, sess=None, data=None):
         bid = self._oid(bid)
-        data = read_json(self)
+        data = data if data is not None else read_json(self)
         with db() as conn:
             row = q(conn, "SELECT * FROM pss_bookings WHERE id=? AND tenant_id=?", (bid, tenant_id), one=True)
             if not row or ((sess or {}).get('agency_id') and row.get('agency_id') != sess.get('agency_id')):
@@ -3305,18 +4986,38 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({'error': 'Passenger already checked in'}, 400)
             checkin_no = self._psn('CI')
             bag_count = int(data.get('bag_count') or 0)
-            bags = data.get('bag_tags') or (', '.join(self._psn('BG') for _ in range(bag_count)) if bag_count else '')
-            conn.execute("""INSERT INTO pss_checkins(tenant_id,checkin_no,booking_id,pnr,flight_id,passenger_name,seat_no,bag_count,bag_tags,checkin_method,counter,agent,status,checked_in_at,created_at,updated_at)
+            bags = ', '.join(self._bag_tag_list(data.get('bag_tags') or '', bag_count))
+            cur = conn.execute("""INSERT INTO pss_checkins(tenant_id,checkin_no,booking_id,pnr,flight_id,passenger_name,seat_no,bag_count,bag_tags,checkin_method,counter,agent,status,checked_in_at,created_at,updated_at)
                             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'checked_in',?,?,?)""",
                          (tenant_id, checkin_no, bid, row.get('pnr'), row.get('flight_id'), row.get('passenger_name'),
                           data.get('seat_no'), bag_count, bags, data.get('checkin_method') or 'counter',
                           data.get('counter'), user_id, now_iso(), now_iso(), now_iso()))
+            checkin_id = cur.lastrowid
+            ci = q(conn, """SELECT ci.*, f.flight_no, f.origin, f.destination FROM pss_checkins ci
+                            LEFT JOIN pss_flights f ON f.id=ci.flight_id WHERE ci.id=? AND ci.tenant_id=?""",
+                   (checkin_id, tenant_id), one=True) or {}
+            prior_sale = q(conn, "SELECT sale_no FROM pss_ancillary_sales WHERE tenant_id=? AND booking_id=? AND description LIKE 'Baggage %' ORDER BY id DESC LIMIT 1", (tenant_id, bid), one=True)
+            conn.execute("SAVEPOINT checkin_bags")
+            try:
+                bags = self._sync_baggage_items(conn, tenant_id, ci, bags, bag_count, user_id,
+                                                sale_no=data.get('sale_no') or (prior_sale or {}).get('sale_no'),
+                                                trace_id=row.get('trace_id'))
+                conn.execute("RELEASE checkin_bags")
+            except Exception as exc:
+                conn.execute("ROLLBACK TO checkin_bags")
+                conn.execute("RELEASE checkin_bags")
+                self._log_exception(Exception(f"baggage sync failed for check-in {checkin_no}: {exc}"))
+                bags = self._bag_tag_list(bags, bag_count)
             conn.execute("UPDATE pss_bookings SET booking_status='checked_in', seat_no=COALESCE(?,seat_no), updated_at=? WHERE id=? AND tenant_id=?",
                          (data.get('seat_no'), now_iso(), bid, tenant_id))
             self._activity(conn, tenant_id, 'pss_booking', bid, 'checked_in', checkin_no, user_id)
             self._trace(conn, tenant_id, 'counter', 'pss_booking', bid, 'checked_in', user_id, checkin_no, row.get('trace_id'), self)
-            log_audit(conn, tenant_id, user_id, 'checkin', 'pss_booking', bid, {'checkin_no': checkin_no})
-        return self._json({'ok': True, 'checkin_no': checkin_no, 'bag_tags': bags})
+            log_audit(conn, tenant_id, user_id, 'checkin', 'pss_booking', bid, {'checkin_no': checkin_no, 'bag_tags': bags})
+        return self._json({'ok': True, 'checkin_id': checkin_id, 'checkin_no': checkin_no, 'bag_tags': bags})
+
+    def api_pss_checkin_create(self, tenant_id, user_id, sess=None):
+        data = read_json(self)
+        return self.api_pss_booking_checkin(tenant_id, user_id, data.get('booking_id'), sess=sess, data=data)
 
     def api_pss_booking_payment(self, tenant_id, user_id, bid, sess=None):
         bid = self._oid(bid)
@@ -3349,13 +5050,153 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 self._log_exception(Exception('erp sync pss payment failed'))
             log_audit(conn, tenant_id, user_id, 'payment', 'pss_booking', bid, {'payment_no': payment_no, 'amount': amount})
+        if status in ('captured', 'paid'):
+            _webhook_event(tenant_id, 'payment.received', {'payment_no': payment_no, 'amount': amount, 'pnr': row.get('pnr'),
+                                                           'payment_status': pay_status}, payment_no)
         return self._json({'ok': True, 'payment_no': payment_no, 'payment_status': pay_status})
 
     def api_pss_checkins(self, tenant_id):
         with db() as conn:
-            rows = q(conn, """SELECT ci.*, f.flight_no, f.origin, f.destination FROM pss_checkins ci
+            rows = q(conn, """SELECT ci.*, f.flight_no, f.origin, f.destination, f.gate, f.terminal,
+                              (SELECT COUNT(*) FROM pss_baggage_items bi WHERE bi.tenant_id=ci.tenant_id AND bi.checkin_id=ci.id) bag_items
+                              FROM pss_checkins ci
                               LEFT JOIN pss_flights f ON f.id=ci.flight_id WHERE ci.tenant_id=? ORDER BY ci.id DESC LIMIT 500""", (tenant_id,))
         return self._json({'checkins': rows})
+
+    def api_pss_checkin_baggage(self, tenant_id, cid):
+        cid = self._oid(cid)
+        with db() as conn:
+            ci = q(conn, """SELECT ci.*, f.flight_no, f.origin, f.destination, f.gate, f.terminal, bk.trace_id
+                            FROM pss_checkins ci LEFT JOIN pss_flights f ON f.id=ci.flight_id
+                            LEFT JOIN pss_bookings bk ON bk.id=ci.booking_id
+                            WHERE ci.tenant_id=? AND ci.id=?""", (tenant_id, cid), one=True)
+            if not ci:
+                return self._json({'error': 'Check-in not found'}, 404)
+            bags = q(conn, """SELECT bi.id,bi.tenant_id,bi.checkin_id,bi.booking_id,bi.bag_tag,bi.sequence_no,
+                              bi.weight_kg,bi.status,bi.location,bi.sale_no,bi.carousel,bi.created_at,bi.updated_at,
+                              ci.pnr checkin_pnr, f.flight_no, f.origin, f.destination
+                              FROM pss_baggage_items bi JOIN pss_checkins ci ON ci.id=bi.checkin_id
+                              LEFT JOIN pss_flights f ON f.id=ci.flight_id
+                              WHERE bi.tenant_id=? AND bi.checkin_id=? ORDER BY bi.sequence_no, bi.id""", (tenant_id, cid))
+            events = q(conn, """SELECT e.*, b.bag_tag FROM pss_baggage_events e
+                                LEFT JOIN pss_baggage_items b ON b.id=e.baggage_id
+                                WHERE e.tenant_id=? AND e.checkin_id=? ORDER BY e.id DESC LIMIT 300""", (tenant_id, cid))
+        return self._json({'checkin': ci, 'baggage': bags, 'events': events})
+
+    def api_pss_checkin_baggage_mutate(self, tenant_id, cid, user_id):
+        cid = self._oid(cid)
+        data = read_json(self)
+        weight = float(data.get('weight_kg') or 0)
+        if weight < 0:
+            return self._json({'error': 'Invalid weight'}, 400)
+        with db() as conn:
+            ci = q(conn, """SELECT ci.*, f.flight_no, f.origin, f.destination, bk.trace_id FROM pss_checkins ci
+                            LEFT JOIN pss_flights f ON f.id=ci.flight_id
+                            LEFT JOIN pss_bookings bk ON bk.id=ci.booking_id
+                            WHERE ci.tenant_id=? AND ci.id=?""", (tenant_id, cid), one=True)
+            if not ci:
+                return self._json({'error': 'Check-in not found'}, 404)
+            raw = data.get('bag_tags') or data.get('bag_tag') or ''
+            pieces = int(data.get('pieces') or 1)
+            tags = self._sync_baggage_items(conn, tenant_id, ci, raw, pieces, user_id, weight,
+                                            data.get('sale_no'), ci.get('trace_id'))
+            self._activity(conn, tenant_id, 'pss_checkin', cid, 'baggage_recorded', ', '.join(tags), user_id)
+            self._trace(conn, tenant_id, 'counter', 'pss_checkin', ci.get('booking_id'), 'baggage_recorded', user_id,
+                        f"{ci.get('pnr') or ci.get('checkin_no')} · {', '.join(tags)}", ci.get('trace_id'), self)
+        return self._json({'ok': True, 'bag_tags': tags})
+
+    def api_pss_baggage_scan(self, tenant_id, bid, user_id):
+        bid = self._oid(bid)
+        data = read_json(self)
+        event_type = str(data.get('event_type') or 'bag_screened').strip()
+        event_status = {'bag_scan': 'screened', 'bag_tagged': 'tagged', 'bag_screened': 'screened', 'bag_loaded': 'loaded',
+                        'bag_unloaded': 'in_transit', 'bag_arrived': 'arrived', 'bag_claimed': 'claimed',
+                        'bag_missing': 'missing'}
+        if event_type not in event_status:
+            return self._json({'error': 'Unsupported baggage event'}, 400)
+        with db() as conn:
+            bag = q(conn, """SELECT b.*, ci.trace_id booking_trace, ci.id checkin_id, ci.pnr FROM pss_baggage_items b
+                             JOIN pss_checkins ci ON ci.id=b.checkin_id
+                             WHERE b.tenant_id=? AND b.id=?""", (tenant_id, bid), one=True)
+            if not bag:
+                return self._json({'error': 'Bag not found'}, 404)
+            location = data.get('location') or {'bag_scan': 'security', 'bag_screened': 'security', 'bag_loaded': 'aircraft',
+                                                'bag_unloaded': 'arrival', 'bag_arrived': 'baggage hall',
+                                                'bag_claimed': 'exit'}.get(event_type, bag.get('location') or 'counter')
+            carousel = data.get('carousel') if data.get('carousel') is not None else bag.get('carousel')
+            conn.execute("UPDATE pss_baggage_items SET status=?,location=?,carousel=?,updated_at=? WHERE id=? AND tenant_id=?",
+                         (event_status[event_type], location, carousel, now_iso(), bid, tenant_id))
+            self._baggage_event(conn, tenant_id, bag, bag['checkin_id'], event_type, location, user_id,
+                                data.get('note'), bag.get('booking_trace'))
+            if event_type == 'bag_arrived':
+                conn.execute("UPDATE pss_checkins SET arrival_status='arrived',carousel=?,updated_at=? WHERE id=? AND tenant_id=?",
+                             (carousel, now_iso(), bag['checkin_id'], tenant_id))
+        return self._json({'ok': True, 'status': event_status[event_type], 'location': location})
+
+    def api_pss_checkin_status(self, tenant_id, cid, user_id):
+        cid = self._oid(cid)
+        data = read_json(self)
+        status = str(data.get('status') or '').strip().lower()
+        allowed = ('boarded', 'gate_closed', 'no_show', 'arrived', 'checked_in')
+        if status not in allowed:
+            return self._json({'error': 'Unsupported check-in status'}, 400)
+        ts = now_iso()
+        vals = {'status': status, 'updated_at': ts}
+        if status == 'boarded':
+            vals.update({'boarding_status': 'boarded', 'boarded_at': ts})
+        elif status == 'gate_closed':
+            vals['gate_closed_at'] = ts
+        elif status == 'arrived':
+            vals.update({'arrival_status': 'arrived', 'carousel': data.get('carousel')})
+        with db() as conn:
+            ci = q(conn, """SELECT ci.*, bk.trace_id booking_trace FROM pss_checkins ci
+                            LEFT JOIN pss_bookings bk ON bk.id=ci.booking_id
+                            WHERE ci.tenant_id=? AND ci.id=?""", (tenant_id, cid), one=True)
+            if not ci:
+                return self._json({'error': 'Check-in not found'}, 404)
+            conn.execute(f"UPDATE pss_checkins SET {','.join(k+'=?' for k in vals)} WHERE id=? AND tenant_id=?",
+                         list(vals.values()) + [cid, tenant_id])
+            if status == 'boarded':
+                conn.execute("UPDATE pss_bookings SET booking_status='boarded',updated_at=? WHERE id=? AND tenant_id=?",
+                             (ts, ci.get('booking_id'), tenant_id))
+            self._activity(conn, tenant_id, 'pss_checkin', cid, 'checkin_' + status, data.get('note') or status, user_id)
+            self._trace(conn, tenant_id, 'gate', 'pss_checkin', ci.get('booking_id'), 'checkin_' + status, user_id,
+                        f"{ci.get('pnr') or ci.get('checkin_no')} · {status}", ci.get('booking_trace'), self)
+        return self._json({'ok': True, 'status': status})
+
+    def api_pss_baggage_tracking(self, tenant_id, qs):
+        pnr = str((qs.get('pnr') or [''])[0] or '').strip()
+        tag = str((qs.get('bag_tag') or [''])[0] or '').strip()
+        bid = self._oid((qs.get('bag_id') or [''])[0])
+        where = ['bi.tenant_id=?']
+        args = [tenant_id]
+        if pnr:
+            where.append('(UPPER(bi.pnr)=UPPER(?) OR UPPER(ci.pnr)=UPPER(?))')
+            args.extend([pnr, pnr])
+        if tag:
+            where.append('UPPER(bi.bag_tag)=UPPER(?)')
+            args.append(tag)
+        if bid:
+            where.append('bi.id=?')
+            args.append(bid)
+        with db() as conn:
+            bags = q(conn, f"""SELECT bi.id,bi.tenant_id,bi.checkin_id,bi.booking_id,bi.bag_tag,bi.sequence_no,
+                               bi.weight_kg,bi.status,bi.location,bi.sale_no,bi.carousel bag_carousel,bi.created_at,bi.updated_at,
+                               ci.checkin_no, ci.pnr, ci.passenger_name, ci.seat_no, ci.status checkin_status,
+                               ci.boarding_status, ci.gate_closed_at, ci.boarded_at, ci.arrival_status, ci.carousel,
+                               f.flight_no, f.origin, f.destination, f.flight_date, f.dep_time, f.gate, f.terminal
+                               FROM pss_baggage_items bi JOIN pss_checkins ci ON ci.id=bi.checkin_id
+                               LEFT JOIN pss_flights f ON f.id=ci.flight_id
+                               WHERE {' AND '.join(where)} ORDER BY bi.id DESC LIMIT 200""", args)
+            ids = [r['id'] for r in bags]
+            events = []
+            if ids:
+                marks = ','.join('?' for _ in ids)
+                events = q(conn, f"""SELECT e.*, b.bag_tag, b.status bag_status, b.location bag_location
+                                     FROM pss_baggage_events e JOIN pss_baggage_items b ON b.id=e.baggage_id
+                                     WHERE e.tenant_id=? AND e.baggage_id IN ({marks}) ORDER BY e.id DESC LIMIT 300""",
+                           [tenant_id] + ids)
+        return self._json({'bags': bags, 'events': events})
 
     def api_pss_payments(self, tenant_id, sess=None):
         with db() as conn:
@@ -3369,6 +5210,29 @@ class Handler(BaseHTTPRequestHandler):
             sql += " ORDER BY p.id DESC LIMIT 500"
             rows = q(conn, sql, args)
         return self._json({'payments': rows})
+
+    def api_pss_payment_mutate(self, tenant_id, pid, method):
+        pid = self._oid(pid)
+        with db() as conn:
+            row = q(conn, "SELECT * FROM pss_payments WHERE id=? AND tenant_id=?", (pid, tenant_id), one=True)
+            if not row:
+                return self._json({'error': 'Payment not found'}, 404)
+            if method == 'GET':
+                return self._json({'payment': row})
+            data = read_json(self)
+            allowed = ('amount', 'method', 'reference', 'status', 'paid_at', 'captured_at', 'notes',
+                       'erp_payment_id', 'customer_id', 'invoice_id')
+            sets, args = [], []
+            for key in allowed:
+                if key in data:
+                    sets.append(f"{key}=?")
+                    args.append(self._oid(data[key]) if key.endswith('_id') else data[key])
+            if not sets:
+                return self._json({'payment': row})
+            args += [now_iso(), pid, tenant_id]
+            conn.execute(f"UPDATE pss_payments SET {','.join(sets)}, updated_at=? WHERE id=? AND tenant_id=?", args)
+            updated = q(conn, "SELECT * FROM pss_payments WHERE id=? AND tenant_id=?", (pid, tenant_id), one=True)
+        return self._json({'ok': True, 'payment': updated})
 
     def api_pss_stock(self, tenant_id):
         with db() as conn:
@@ -3494,6 +5358,15 @@ class Handler(BaseHTTPRequestHandler):
                        WHERE b.id=? AND b.tenant_id=?""", (bid, tenant_id), one=True)
         if not b:
             return None
+        trip_key = b.get('trip_pnr') or b.get('pnr')
+        trip_rows = q(conn, """SELECT tb.*, f.flight_no,f.origin,f.destination,f.flight_date,f.dep_time
+                               FROM pss_bookings tb LEFT JOIN pss_flights f ON f.id=tb.flight_id
+                               WHERE tb.tenant_id=? AND (tb.trip_pnr=? OR tb.itinerary_id=?)
+                               ORDER BY tb.segment_index, tb.id""",
+                      (tenant_id, trip_key, b.get('itinerary_id') or ''), one=False)
+        trip_rows = trip_rows or [b]
+        trip_ids = [r['id'] for r in trip_rows]
+        trip_marks = ','.join(['?'] * len(trip_ids))
         ts = now_iso()
         name = (b.get('passenger_name') or 'PSS Passenger').strip()
         email = (b.get('contact_email') or '').strip() or None
@@ -3508,6 +5381,10 @@ class Handler(BaseHTTPRequestHandler):
         if not cid and email:
             c = q(conn, "SELECT id FROM customers WHERE tenant_id=? AND lower(email)=lower(?)", (tenant_id, email), one=True)
             cid = c['id'] if c else None
+        if not cid and not email and name:
+            c = q(conn, "SELECT id FROM customers WHERE tenant_id=? AND lower(trim(COALESCE(name,'')))=lower(trim(?))",
+                  (tenant_id, name), one=True)
+            cid = c['id'] if c else None
         if not cid:
             cur = conn.execute(
                 "INSERT INTO customers(tenant_id,type,name,company,email,phone,notes,created_at,agency_id,source,source_ref) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
@@ -3516,17 +5393,24 @@ class Handler(BaseHTTPRequestHandler):
         else:
             conn.execute("UPDATE customers SET name=COALESCE(?,name), email=COALESCE(?,email), phone=COALESCE(?,phone), agency_id=COALESCE(?,agency_id) WHERE id=? AND tenant_id=?",
                          (name, email, phone, agency_id, cid, tenant_id))
+        if b.get('portal_customer_id'):
+            try:
+                conn.execute("UPDATE customers SET portal_customer_id=? WHERE id=? AND tenant_id=? AND portal_customer_id IS NULL",
+                             (b.get('portal_customer_id'), cid, tenant_id))
+            except Exception:
+                pass
         # order
         oid = b.get('order_id')
         if not oid:
-            o = q(conn, "SELECT id FROM orders WHERE tenant_id=? AND pss_booking_id=?", (tenant_id, bid), one=True)
+            o = q(conn, f"SELECT id FROM orders WHERE tenant_id=? AND pss_booking_id IN ({trip_marks}) ORDER BY id LIMIT 1",
+                  [tenant_id] + trip_ids, one=True)
             oid = o['id'] if o else None
-        total = float(b.get('total_amount') or 0)
-        pnr = b.get('pnr') or f"PSS-{bid}"
+        total = round(sum(float(r.get('total_amount') or 0) for r in trip_rows), 2)
+        pnr = trip_key or f"PSS-{bid}"
         src = f"pss_booking:{bid}"
         if not oid:
             conn.execute("""INSERT INTO orders(tenant_id,branch_id,source_type,source_id,connector_id,raw_document_id,pnr,order_number,office_id,account_code,customer_id,owner_user_id,product_type,status,ticket_status,tktl,booking_date,travel_start,travel_end,origin,destination,currency,total_sell,total_cost,margin,balance_due,notes,created_at,updated_at,agency_id,pss_booking_id,booking_source,trace_id)
-                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                          (tenant_id, None, 'pss_booking', src, None, None, pnr, pnr, b.get('airport_code'), None, cid, b.get('created_by'),
                           'Flight', b.get('booking_status') or 'booked', b.get('ticket_status') or 'unissued', None,
                           (b.get('created_at') or ts)[:10], b.get('flight_date'), b.get('flight_date'),
@@ -3544,38 +5428,82 @@ class Handler(BaseHTTPRequestHandler):
                           agency_id, source, b.get('trace_id'), b.get('ticket_status') or 'unissued', oid, tenant_id))
         # invoice
         iid = b.get('invoice_id')
+        inv_no = ''
         if not iid:
-            inv = q(conn, "SELECT id FROM invoices WHERE tenant_id=? AND pss_booking_id=?", (tenant_id, bid), one=True)
+            inv = q(conn, f"SELECT id FROM invoices WHERE tenant_id=? AND pss_booking_id IN ({trip_marks}) ORDER BY id LIMIT 1",
+                    [tenant_id] + trip_ids, one=True)
             iid = inv['id'] if inv else None
-        fare = float(b.get('fare_amount') or 0)
-        taxes = float(b.get('taxes') or 0)
-        inv_total = float(b.get('total_amount') or (fare + taxes))
+        if iid:
+            inv_no = (q(conn, "SELECT invoice_no FROM invoices WHERE id=? AND tenant_id=?", (iid, tenant_id), one=True) or {}).get('invoice_no') or ''
+        fare = round(sum(float(r.get('fare_amount') or 0) for r in trip_rows), 2)
+        taxes = round(sum(float(r.get('taxes') or 0) for r in trip_rows), 2)
+        flight_total = round(sum(float(r.get('total_amount') or 0) for r in trip_rows), 2)
         cur = b.get('currency') or 'USD'
+        anc_rows = q(conn, f"""SELECT id,description,quantity,unit_price,amount FROM pss_ancillary_sales
+                               WHERE tenant_id=? AND booking_id IN ({trip_marks}) AND LOWER(COALESCE(status,'sold'))<>'void'""",
+                     [tenant_id] + trip_ids)
+        anc_total = round(sum(float(r.get('amount') or 0) for r in anc_rows), 2)
+        inv_total = round(flight_total + anc_total, 2)
+
+        def anc_line_desc(r):
+            return f"Ancillary: {(r.get('description') or 'Service').strip()}"
+
         if not iid:
             n = q(conn, "SELECT COUNT(*) c FROM invoices WHERE tenant_id=?", (tenant_id,), one=True)['c'] + 1
             inv_no = f"INV-PSS-{ts[:4]}-{n:05d}"
             conn.execute("""INSERT INTO invoices(tenant_id,branch_id,order_id,customer_id,invoice_no,kind,status,issue_date,due_date,currency,subtotal,tax,fees,discount,total,amount_paid,balance,notes,created_at,agency_id,pss_booking_id,source)
                             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, ?,?,?)""",
-                         (tenant_id, None, oid, cid, inv_no, 'invoice', 'issued', ts[:10], ts[:10], cur, fare, taxes, 0, 0, inv_total, 0, inv_total,
+                         (tenant_id, None, oid, cid, inv_no, 'invoice', 'issued', ts[:10], ts[:10], cur, fare, taxes, anc_total, 0, inv_total, 0, inv_total,
                           f"Auto invoice for PSS booking {pnr}", ts, agency_id, bid, source))
             iid = q(conn, "SELECT last_insert_rowid() v", (), one=True)['v']
-            desc = f"Flight {b.get('flight_no') or ''} {b.get('origin') or ''}-{b.get('destination') or ''} {b.get('flight_date') or ''} ({pnr})".strip()
-            conn.execute("INSERT INTO invoice_lines(tenant_id,invoice_id,description,qty,unit_cost,unit_price,tax,line_total) VALUES (?,?,?,?,?,?,?,?)",
-                         (tenant_id, iid, desc, 1, 0, fare, taxes, inv_total))
+            for tr in trip_rows:
+                t_fare = float(tr.get('fare_amount') or 0)
+                t_tax = float(tr.get('taxes') or 0)
+                t_total = float(tr.get('total_amount') or (t_fare + t_tax))
+                desc = f"Flight {tr.get('flight_no') or ''} {tr.get('origin') or ''}-{tr.get('destination') or ''} {tr.get('flight_date') or ''} ({tr.get('pnr') or pnr}) · {tr.get('passenger_name') or name}".strip()
+                conn.execute("INSERT INTO invoice_lines(tenant_id,invoice_id,description,qty,unit_cost,unit_price,tax,line_total) VALUES (?,?,?,?,?,?,?,?)",
+                             (tenant_id, iid, desc, 1, 0, t_fare, t_tax, t_total))
+            for r in anc_rows:
+                qty = max(1, int(r.get('quantity') or 1))
+                amt = round(float(r.get('amount') or 0), 2)
+                conn.execute("INSERT INTO invoice_lines(tenant_id,invoice_id,description,qty,unit_cost,unit_price,tax,line_total) VALUES (?,?,?,?,?,?,?,?)",
+                             (tenant_id, iid, anc_line_desc(r), qty, 0, round(amt / qty, 2), 0, amt))
             conn.execute("INSERT INTO journals(tenant_id,ref_type,ref_id,entry_date,memo,debit_account,credit_account,amount,currency,created_at,agency_id,pss_booking_id,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                          (tenant_id, 'invoice', iid, ts[:10], f"Invoice {inv_no}", 'Accounts Receivable', 'Sales', inv_total, cur, ts, agency_id, bid, source))
+        else:
+            changed = False
+            for r in anc_rows:
+                d = anc_line_desc(r)
+                if q(conn, "SELECT 1 FROM invoice_lines WHERE tenant_id=? AND invoice_id=? AND description=?", (tenant_id, iid, d), one=True):
+                    continue
+                qty = max(1, int(r.get('quantity') or 1))
+                amt = round(float(r.get('amount') or 0), 2)
+                conn.execute("INSERT INTO invoice_lines(tenant_id,invoice_id,description,qty,unit_cost,unit_price,tax,line_total) VALUES (?,?,?,?,?,?,?,?)",
+                             (tenant_id, iid, d, qty, 0, round(amt / qty, 2), 0, amt))
+                changed = True
+            lines_sum = round(float((q(conn, "SELECT COALESCE(SUM(line_total),0) s FROM invoice_lines WHERE tenant_id=? AND invoice_id=?",
+                                       (tenant_id, iid), one=True) or {}).get('s') or 0), 2)
+            if lines_sum > 0:
+                inv_row = q(conn, "SELECT total,fees FROM invoices WHERE id=? AND tenant_id=?", (iid, tenant_id), one=True) or {}
+                if changed or abs(lines_sum - float(inv_row.get('total') or 0)) > 0.009 or abs(anc_total - float(inv_row.get('fees') or 0)) > 0.009:
+                    conn.execute("UPDATE invoices SET fees=?, total=? WHERE id=? AND tenant_id=?",
+                                 (anc_total, lines_sum, iid, tenant_id))
         # update links
-        conn.execute("UPDATE pss_bookings SET customer_id=?, order_id=?, invoice_id=? WHERE id=? AND tenant_id=?", (cid, oid, iid, bid, tenant_id))
+        conn.execute(f"UPDATE pss_bookings SET customer_id=?, order_id=?, invoice_id=? WHERE tenant_id=? AND id IN ({trip_marks})",
+                     [cid, oid, iid, tenant_id] + trip_ids)
         try:
             from ingest import recompute_invoice as _ri
             _ri(conn, iid)
         except Exception:
             pass
+        if iid and inv_no and not q(conn, "SELECT 1 FROM pss_trace WHERE tenant_id=? AND entity_type='invoice' AND entity_id=? AND action='invoice_created'", (tenant_id, iid), one=True):
+            self._trace(conn, tenant_id, source or 'erp', 'invoice', iid, 'invoice_created', actor,
+                        f"{inv_no} · PNR {pnr}", b.get('trace_id'), self)
         try:
             self._activity(conn, tenant_id, 'pss_booking', bid, 'erp_synced', f"customer={cid} order={oid} invoice={iid}", actor)
         except Exception:
             pass
-        return {'customer_id': cid, 'order_id': oid, 'invoice_id': iid}
+        return {'customer_id': cid, 'order_id': oid, 'invoice_id': iid, 'invoice_no': inv_no}
 
     def _erp_sync_pss_payment(self, conn, tenant_id, pss_payment_id, actor='system', source=None):
         p = q(conn, "SELECT * FROM pss_payments WHERE id=? AND tenant_id=?", (pss_payment_id, tenant_id), one=True)
@@ -3618,7 +5546,8 @@ class Handler(BaseHTTPRequestHandler):
             epid = ex['id']
         if iid:
             try:
-                conn.execute("INSERT INTO allocations(tenant_id,payment_id,invoice_id,amount,created_at) VALUES (?,?,?,?,?)", (tenant_id, epid, iid, amount, ts))
+                if not q(conn, "SELECT 1 FROM allocations WHERE tenant_id=? AND payment_id=? AND invoice_id=?", (tenant_id, epid, iid), one=True):
+                    conn.execute("INSERT INTO allocations(tenant_id,payment_id,invoice_id,amount,created_at) VALUES (?,?,?,?,?)", (tenant_id, epid, iid, amount, ts))
             except Exception:
                 pass
             try:
@@ -3667,6 +5596,27 @@ class Handler(BaseHTTPRequestHandler):
             rows = q(conn, "SELECT code,name FROM tenants WHERE status='active' ORDER BY id")
         return self._json({'tenants': rows})
 
+    def api_portal_branding(self, qs):
+        tenant = self._portal_tenant((qs.get('tenant') or [''])[0])
+        if not tenant:
+            return self._json({'error': 'Unknown airline portal'}, 404)
+        with db() as conn:
+            branding = self._branding(conn, tenant['id'])
+            tenant_row = q(conn, "SELECT code,name FROM tenants WHERE id=?", (tenant['id'],), one=True) or {}
+        name = branding.get('company_name') or tenant_row.get('name') or 'Fayaka Airline'
+        return self._json({
+            'branding': branding,
+            'airline': {
+                'code': (tenant_row.get('code') or tenant.get('code') or 'FA').upper()[:3],
+                'name': name,
+                'tagline': branding.get('tagline') or branding.get('location') or 'Fly with confidence',
+                'logo_data': branding.get('logo_data') or '',
+                'logo_text': branding.get('logo_text') or name[:3].upper(),
+                'primary_color': branding.get('primary_color') or '#0f2742',
+                'accent_color': branding.get('accent_color') or '#f59e0b'
+            }
+        })
+
     def api_portal_flights(self, qs):
         tenant = self._portal_tenant((qs.get('tenant') or [''])[0])
         if not tenant:
@@ -3690,6 +5640,172 @@ class Handler(BaseHTTPRequestHandler):
 
     def _portal_cabin_multiplier(self, cabin):
         return {'Y': 1.0, 'P': 1.6, 'C': 2.5, 'F': 4.0}.get((cabin or 'Y').upper(), 1.0)
+
+    def _portal_duration(self, dep, arr):
+        try:
+            dh, dm = [int(x) for x in str(dep or '').split(':')[:2]]
+            ah, am = [int(x) for x in str(arr or '').split(':')[:2]]
+            start, end = dh * 60 + dm, ah * 60 + am
+            if end < start:
+                end += 1440
+            mins = max(0, end - start)
+            return f"{mins // 60}h {mins % 60:02d}m", mins
+        except Exception:
+            return '', 0
+
+    def _portal_fare_family(self, cabin, baggage=None):
+        profiles = {
+            'Y': {'code': 'ECONOMY SAVER', 'name': 'Economy Saver', 'refundable': False,
+                  'change_policy': 'Changes permitted with fee', 'change_fee': 50,
+                  'carry_on': '7 kg', 'seat_selection': 'Paid', 'priority_boarding': False,
+                  'lounge': False, 'tagline': 'Lowest published fare for budget travel'},
+            'P': {'code': 'PREMIUM FLEX', 'name': 'Premium Flex', 'refundable': True,
+                  'refund_fee': 25, 'change_policy': 'One free change', 'change_fee': 0,
+                  'carry_on': '10 kg', 'seat_selection': 'Included', 'priority_boarding': True,
+                  'lounge': False, 'tagline': 'Extra comfort with flexible conditions'},
+            'C': {'code': 'BUSINESS FLEX', 'name': 'Business Flex', 'refundable': True,
+                  'refund_fee': 0, 'change_policy': 'Free changes', 'change_fee': 0,
+                  'carry_on': '14 kg', 'seat_selection': 'Included', 'priority_boarding': True,
+                  'lounge': True, 'tagline': 'Flexible business travel with priority service'},
+            'F': {'code': 'FIRST SIGNATURE', 'name': 'First Signature', 'refundable': True,
+                  'refund_fee': 0, 'change_policy': 'Free changes', 'change_fee': 0,
+                  'carry_on': '18 kg', 'seat_selection': 'Included', 'priority_boarding': True,
+                  'lounge': True, 'tagline': 'Premium cabin with the most flexible conditions'}
+        }
+        out = dict(profiles.get((cabin or 'Y').upper(), profiles['Y']))
+        if isinstance(baggage, dict) and baggage.get('free_kg'):
+            kg = str(baggage['free_kg']).strip()
+            out['checked_baggage'] = kg if 'kg' in kg.lower() else f"{kg} kg"
+        else:
+            out['checked_baggage'] = {'Y': '23 kg', 'P': '30 kg', 'C': '40 kg', 'F': '50 kg'}.get((cabin or 'Y').upper(), '23 kg')
+        out['conditions'] = [
+            f"Refundable: {'Yes' if out.get('refundable') else 'No'}" + (f" ({out['refund_fee']} fee)" if out.get('refund_fee') else ''),
+            out['change_policy'] + (f" ({out['change_fee']} fee)" if out.get('change_fee') else ''),
+            f"Carry-on {out['carry_on']} · Checked {out['checked_baggage']}",
+            f"Seat selection {str(out['seat_selection']).lower()}",
+            'Fare conditions shown are indicative and must be confirmed at ticketing.'
+        ]
+        return out
+
+    def _portal_equipment(self, aircraft, total_seats, available_seats):
+        code = str(aircraft or '').upper()
+        if '787' in code or '777' in code or 'A330' in code:
+            layout, seats_per_row, pitch, wifi = '2-3-2', 7, '81 cm', True
+        elif 'A320' in code or 'B737' in code or 'CRJ' in code or 'E190' in code:
+            layout, seats_per_row, pitch, wifi = '3-3', 6, '76 cm', False
+        else:
+            layout, seats_per_row, pitch, wifi = '3-3', 6, '79 cm', True
+        total = max(0, int(total_seats or 0))
+        available = max(0, min(int(available_seats or 0), total))
+        occupied = max(0, total - available)
+        letters = ['A', 'B', 'C', 'D', 'E', 'F'] if layout == '3-3' else ['A', 'B', 'D', 'E', 'F', 'G', 'H']
+        rows = max(6, min(40, (total or 180) // seats_per_row))
+        seat_rows = []
+        taken = 0
+        for row_no in range(1, rows + 1):
+            cells = []
+            for letter in letters:
+                status = 'occupied' if taken < occupied else 'available'
+                taken += 1 if status == 'occupied' else 0
+                cells.append({'label': f"{row_no}{letter}", 'status': status})
+            seat_rows.append({'row': row_no, 'seats': cells})
+        return {
+            'aircraft': aircraft or 'Not published',
+            'layout': layout,
+            'seat_pitch': pitch,
+            'wifi': 'Available' if wifi else 'Not available',
+            'seat_rows': seat_rows,
+            'legend': {'available': 'Available', 'occupied': 'Occupied'}
+        }
+
+    def _portal_enrich(self, conn, tenant_id, seg_results, cabin):
+        flights = [f for seg in seg_results for f in seg]
+        ids = [f.get('id') for f in flights if f.get('id') is not None]
+        codes = sorted({str(f.get(k) or '').upper() for f in flights for k in ('origin', 'destination') if f.get(k)})
+        id_marks = ','.join(['?'] * len(ids)) if ids else 'NULL'
+        code_marks = ','.join(['?'] * len(codes)) if codes else 'NULL'
+
+        bag_rows = q(conn, f"""SELECT flight_id,cabin_class,free_kg,free_pieces,excess_rate_per_kg,max_kg,notes
+                               FROM pss_baggage_rules
+                               WHERE tenant_id=? AND (flight_id IS NULL OR flight_id IN ({id_marks}))""", [tenant_id] + ids)
+        anc_rows = q(conn, f"""SELECT id,code,name,category,description,price,currency,unit,capacity,flight_id,status
+                               FROM pss_ancillaries
+                               WHERE tenant_id=? AND status='active' AND (flight_id IS NULL OR flight_id IN ({id_marks}))
+                               ORDER BY id""", [tenant_id] + ids)
+        airport_rows = q(conn, f"""SELECT code,icao,name,city,country,timezone,terminal,region,is_hub
+                                   FROM pss_airports WHERE tenant_id=? AND code IN ({code_marks})""", [tenant_id] + codes) if codes else []
+        weather_rows = q(conn, f"""SELECT airport_code,condition,temperature_c,wind_kph,visibility_km,advisory,observed_at
+                                   FROM pss_weather WHERE tenant_id=? AND status='current'
+                                   AND airport_code IN ({code_marks}) ORDER BY airport_code,id DESC""", [tenant_id] + codes) if codes else []
+        doc_rows = q(conn, f"""SELECT airport_code,doc_type,title,description,requirement,applies_to
+                               FROM pss_airport_docs WHERE tenant_id=? AND status='active'
+                               AND airport_code IN ({code_marks}) ORDER BY airport_code,id""", [tenant_id] + codes) if codes else []
+        ndc_rows = q(conn, "SELECT status FROM connectors WHERE tenant_id=? AND LOWER(COALESCE(type,''))='ndc'", (tenant_id,))
+        plan = plan_for_tenant(conn, tenant_id) or {}
+        features = plan.get('features_json') or {}
+        if isinstance(features, str):
+            try: features = json.loads(features)
+            except Exception: features = {}
+        if not isinstance(features, dict):
+            features = {}
+        ndc_active = any(str(r.get('status') or '').lower() in ('active', 'connected', 'enabled') for r in ndc_rows)
+        capabilities = {
+            'ndc': bool(features.get('ndc') or ndc_active),
+            'online_booking': True,
+            'e_ticket': True,
+            'seat_map': True,
+            'ancillaries': True
+        }
+
+        def grouped(rows, key):
+            out = {}
+            for row in rows:
+                out.setdefault(row.get(key), []).append(row)
+            return out
+
+        bmap = grouped(bag_rows, 'flight_id')
+        wmap = {}
+        for row in weather_rows:
+            wmap.setdefault(row.get('airport_code'), row)
+        dmap = grouped(doc_rows, 'airport_code')
+        pmap = {str(row.get('code') or '').upper(): row for row in airport_rows}
+        catalog, seen = [], set()
+        for row in anc_rows:
+            aid = row.get('id')
+            if aid in seen:
+                continue
+            seen.add(aid)
+            catalog.append(row)
+
+        def pick_bag(pool):
+            if not pool:
+                return None
+            return (next((r for r in pool if str(r.get('cabin_class') or '').upper() == str(cabin or 'Y').upper()), None)
+                    or next((r for r in pool if str(r.get('cabin_class') or 'Y').upper() == 'Y'), None)
+                    or pool[0])
+
+        for f in flights:
+            rule = pick_bag(bmap.get(f.get('id'))) or pick_bag(bmap.get(None))
+            family = self._portal_fare_family(cabin, rule)
+            duration, minutes = self._portal_duration(f.get('dep_time'), f.get('arr_time'))
+            total = int(f.get('total_seats') or 0)
+            avail = int(f.get('available_seats') or 0)
+            f['seats_total'] = total
+            f['seats_available'] = avail
+            f['duration'] = duration
+            f['duration_minutes'] = minutes
+            f['stops'] = 'Nonstop'
+            f['baggage'] = rule or {'free_kg': family.get('checked_baggage'), 'free_pieces': 1}
+            f['fare_family'] = family
+            f['refundable'] = family.get('refundable')
+            f['terms'] = family.get('conditions')
+            f['ancillaries'] = [a for a in catalog if a.get('flight_id') in (None, f.get('id'))]
+            f['equipment'] = self._portal_equipment(f.get('aircraft'), total, avail)
+            f['airports'] = {k: pmap.get(str(f.get(k) or '').upper()) for k in ('origin', 'destination')}
+            f['weather'] = {k: wmap.get(str(f.get(k) or '').upper()) for k in ('origin', 'destination')}
+            f['documents'] = {k: dmap.get(str(f.get(k) or '').upper(), []) for k in ('origin', 'destination')}
+            f['ndc'] = {'enabled': capabilities['ndc'], 'offer': f"NDC-{f.get('flight_no')}" if capabilities['ndc'] else ''}
+        return catalog, capabilities
 
     def api_portal_search(self, qs):
         tenant = self._portal_tenant((qs.get('tenant') or [''])[0])
@@ -3716,13 +5832,15 @@ class Handler(BaseHTTPRequestHandler):
         with db() as conn:
             def flights(o, d, dt):
                 sql = """SELECT id,flight_no,origin,destination,flight_date,dep_time,arr_time,aircraft,
-                                available_seats,base_fare,currency,gate,terminal,status
-                         FROM pss_flights WHERE tenant_id=? AND LOWER(COALESCE(status,'scheduled')) IN ('scheduled','boarding')"""
+                                available_seats,total_seats,base_fare,currency,gate,terminal,status
+                         FROM pss_flights WHERE tenant_id=? AND LOWER(COALESCE(status,'scheduled'))='scheduled'"""
                 args = [tenant['id']]
                 if o: sql += " AND UPPER(origin)=?"; args.append(o)
                 if d: sql += " AND UPPER(destination)=?"; args.append(d)
                 if dt: sql += " AND flight_date=?"; args.append(dt)
-                sql += " AND COALESCE(available_seats, total_seats, 0)>0 ORDER BY flight_date,dep_time LIMIT 100"
+                seats_needed = max(1, adults + children)
+                sql += " AND COALESCE(available_seats,0)>=? ORDER BY flight_date,dep_time LIMIT 100"
+                args.append(seats_needed)
                 rows = q(conn, sql, args)
                 for r in rows:
                     r['fare'] = round(float(r.get('base_fare') or 0) * multiplier, 2)
@@ -3735,11 +5853,13 @@ class Handler(BaseHTTPRequestHandler):
                 seg_results = [flights(origin, dest, date)]
                 if trip == 'return' and return_date:
                     seg_results.append(flights(dest, origin, return_date))
+            catalog, capabilities = self._portal_enrich(conn, tenant['id'], seg_results, cabin)
         return self._json({'airline': tenant, 'trip_type': trip, 'cabin': cabin,
                            'passengers': {'adults': adults, 'children': children, 'infants': infants,
                                           'total': adults + children + infants},
                            'segments': seg_results, 'outbound': seg_results[0] if seg_results else [],
-                           'return': seg_results[1] if len(seg_results) > 1 else []})
+                           'return': seg_results[1] if len(seg_results) > 1 else [],
+                           'ancillaries': catalog, 'capabilities': capabilities})
 
 
     def _agency_offer(self, conn, token):
@@ -3747,7 +5867,8 @@ class Handler(BaseHTTPRequestHandler):
                                  f.flight_no, f.origin, f.destination, f.flight_date, f.dep_time, f.arr_time, f.available_seats
                           FROM pss_eticket_directs o JOIN pss_agencies a ON a.id=o.agency_id
                           LEFT JOIN pss_flights f ON f.id=o.flight_id
-                          WHERE o.token=? AND o.status='active'""", (token,), one=True)
+                          WHERE o.token=? AND o.status='active' AND (o.valid_until IS NULL OR o.valid_until>?)""",
+                       (token, now_iso()), one=True)
 
     def api_portal_charter(self):
         data = read_json(self)
@@ -3769,6 +5890,31 @@ class Handler(BaseHTTPRequestHandler):
             rid = q(conn, "SELECT last_insert_rowid() v", (), one=True)['v']
             self._trace(conn, tenant['id'], 'portal', 'pss_charter_request', rid, 'charter_requested',
                         data.get('client_name'), f"{request_no} · {data.get('origin')}-{data.get('destination')}", trace_id, self)
+            email = (data.get('email') or '').strip() or None
+            client = (data.get('client_name') or '').strip()
+            cid = None
+            if email:
+                hit = q(conn, "SELECT id FROM customers WHERE tenant_id=? AND lower(email)=lower(?)", (tenant['id'], email), one=True)
+                cid = hit['id'] if hit else None
+            if not cid and client:
+                hit = q(conn, "SELECT id FROM customers WHERE tenant_id=? AND lower(trim(COALESCE(name,'')))=lower(trim(?))",
+                        (tenant['id'], client), one=True)
+                cid = hit['id'] if hit else None
+            if not cid:
+                cur = conn.execute("""INSERT INTO customers(tenant_id,type,name,company,email,phone,notes,created_at,source,source_ref)
+                                      VALUES (?,?,?,?,?,?,?,?, 'portal', ?)""",
+                                   (tenant['id'], 'B2B', client, client, email, data.get('phone'),
+                                    f"Charter request {request_no}", now_iso(), request_no))
+                cid = cur.lastrowid
+            else:
+                conn.execute("""UPDATE customers SET email=COALESCE(email,?), phone=COALESCE(phone,?),
+                                notes=COALESCE(NULLIF(notes,''), ?) WHERE id=? AND tenant_id=?""",
+                             (email, data.get('phone'), f"Charter request {request_no}", cid, tenant['id']))
+            try:
+                self._activity(conn, tenant['id'], 'customer', cid, 'charter_request',
+                               f"{request_no} · {client}", 'portal')
+            except Exception:
+                pass
         return self._json({'ok': True, 'request_no': request_no, 'trace_id': trace_id})
 
     def api_portal_book(self):
@@ -3798,22 +5944,32 @@ class Handler(BaseHTTPRequestHandler):
         trace_id = self._new_trace_id()
         psess = get_portal_session(self)
         portal_customer_id = psess['customer_id'] if psess else None
+        erp = {}
+        sync_errors = 0
         with db() as conn:
             web_channel_row = q(conn, "SELECT id FROM pss_channels WHERE tenant_id=? AND code='WEB'", (tenant['id'],), one=True)
             web_channel = web_channel_row['id'] if web_channel_row else None
+            sess_email = sess_phone = None
+            if portal_customer_id:
+                pc = q(conn, "SELECT email,phone FROM portal_customers WHERE id=? AND tenant_id=?",
+                       (portal_customer_id, tenant['id']), one=True)
+                if pc:
+                    sess_email = (pc.get('email') or '').strip() or None
+                    sess_phone = (pc.get('phone') or '').strip() or None
             conn.execute("SAVEPOINT portal_book")
             try:
                 flights = []
                 for fid in flight_ids:
-                    f = q(conn, "SELECT * FROM pss_flights WHERE id=? AND tenant_id=? AND status='scheduled'", (fid, tenant['id']), one=True)
+                    f = q(conn, "SELECT * FROM pss_flights WHERE id=? AND tenant_id=? AND LOWER(COALESCE(status,'scheduled'))='scheduled'", (fid, tenant['id']), one=True)
                     if not f:
                         raise ValueError('Flight not found')
-                    reserved = conn.execute("UPDATE pss_flights SET available_seats=available_seats-1, updated_at=? WHERE id=? AND tenant_id=? AND available_seats>0",
-                                            (now_iso(), fid, tenant['id']))
+                    needed = len(passengers)
+                    reserved = conn.execute("UPDATE pss_flights SET available_seats=available_seats-?, updated_at=? WHERE id=? AND tenant_id=? AND available_seats>=?",
+                                            (needed, now_iso(), fid, tenant['id'], needed))
                     if reserved.rowcount < 1:
-                        raise ValueError('A selected flight is full - no booking was made')
+                        raise ValueError('A selected flight does not have enough seats - no booking was made')
                     flights.append(f)
-                booking_ids, total = [], 0.0
+                booking_ids, rows_meta, total = [], [], 0.0
                 for pax in passengers:
                     name = str(pax.get('full_name') or pax.get('name') or '').strip()
                     if not name:
@@ -3830,19 +5986,40 @@ class Handler(BaseHTTPRequestHandler):
                                 'taxes','total_amount','currency','ticket_status','payment_status','booking_status',
                                 'booking_source','trace_id','itinerary_id','trip_type','segment_index','created_at','updated_at','portal_customer_id']
                         vals = [tenant['id'], row_pnr, pnr, f['id'], name, ptype, pax.get('doc_no'),
-                                contact.get('email') or pax.get('email'), contact.get('phone') or pax.get('phone'), web_channel,
+                                contact.get('email') or pax.get('email') or sess_email,
+                                contact.get('phone') or pax.get('phone') or sess_phone, web_channel,
                                 f.get('origin'), cabin, fare, taxes, amount, f.get('currency') or 'USD',
                                 'unissued', 'pending', 'confirmed', 'portal', trace_id, itinerary_id, trip, idx,
                                 now_iso(), now_iso(), portal_customer_id]
                         conn.execute("INSERT INTO pss_bookings(" + ','.join(cols) + ") VALUES (" + ','.join(['?'] * len(cols)) + ")", vals)
-                        booking_ids.append(q(conn, "SELECT last_insert_rowid() v", (), one=True)['v'])
-                        self._seed_tax_lines(conn, tenant['id'], booking_ids[-1], {'taxes': taxes, 'currency': f.get('currency') or 'USD'})
+                        bid = q(conn, "SELECT last_insert_rowid() v", (), one=True)['v']
+                        booking_ids.append(bid)
+                        rows_meta.append((bid, f['id']))
+                        self._seed_tax_lines(conn, tenant['id'], bid, {'taxes': taxes, 'currency': f.get('currency') or 'USD'})
+                seat_by_flight = {}
+                for s in (data.get('seat_selections') or []):
+                    fid = self._oid(s.get('flight_id'))
+                    seat = str(s.get('seat') or '').strip().upper()
+                    if fid and seat:
+                        seat_by_flight.setdefault(fid, []).append(seat)
+                for fid, seats in seat_by_flight.items():
+                    for bid, row_fid in rows_meta:
+                        if row_fid != fid or not seats:
+                            continue
+                        conn.execute("UPDATE pss_bookings SET seat_no=? WHERE id=? AND tenant_id=? AND seat_no IS NULL",
+                                     (seats.pop(0), bid, tenant['id']))
+                selected_flight_ids = set(flight_ids)
                 for item in (data.get('ancillaries') or []):
                     aid = self._oid(item.get('ancillary_id'))
                     anc = q(conn, "SELECT * FROM pss_ancillaries WHERE id=? AND tenant_id=?", (aid, tenant['id']), one=True)
                     if not anc:
                         continue
-                    qty = int(item.get('quantity') or 1)
+                    if str(anc.get('status') or 'active').lower() not in ('active', 'sold'):
+                        continue
+                    anc_flight = self._oid(anc.get('flight_id'))
+                    if anc_flight and anc_flight not in selected_flight_ids:
+                        continue
+                    qty = max(1, int(item.get('quantity') or 1))
                     amount = float(anc.get('price') or 0) * qty
                     total += amount
                     conn.execute("""INSERT INTO pss_ancillary_sales(tenant_id,sale_no,booking_id,ancillary_id,description,quantity,unit_price,amount,currency,status,payment_status,trace_id,created_by,created_at,updated_at)
@@ -3852,19 +6029,29 @@ class Handler(BaseHTTPRequestHandler):
                 self._trace(conn, tenant['id'], 'portal', 'pss_booking', booking_ids[0], 'booking_created',
                             contact.get('email') or passengers[0].get('full_name'),
                             f"PNR {pnr} · {len(passengers)} pax · {len(flights)} segment(s)", trace_id, self)
-                for _bid in booking_ids:
+                if booking_ids:
                     try:
-                        self._erp_sync_pss_booking(conn, tenant['id'], _bid, actor='portal', source='portal')
-                    except Exception:
-                        pass
+                        erp = self._erp_sync_pss_booking(conn, tenant['id'], booking_ids[0], actor='portal', source='portal') or {}
+                    except Exception as exc:
+                        sync_errors += 1
+                        self._log_exception(exc)
                 conn.execute("RELEASE portal_book")
             except Exception as exc:
                 self._log_exception(exc)
                 conn.execute("ROLLBACK TO portal_book")
                 return self._json({'error': 'Booking failed - please try again'}, 400)
+        if not erp.get('invoice_no') and booking_ids:
+            with db() as conn:
+                inv = q(conn, "SELECT id,invoice_no FROM invoices WHERE tenant_id=? AND pss_booking_id=? ORDER BY id DESC LIMIT 1",
+                        (tenant['id'], booking_ids[0]), one=True) or {}
+            if inv:
+                erp = {**erp, 'invoice_id': inv.get('id'), 'invoice_no': inv.get('invoice_no')}
         return self._json({'ok': True, 'pnr': pnr, 'itinerary_id': itinerary_id, 'trace_id': trace_id,
                            'booking_ids': booking_ids, 'total': round(total, 2),
-                           'segments': len(flights), 'passengers': len(passengers)})
+                           'segments': len(flights), 'passengers': len(passengers),
+                           'invoice_id': erp.get('invoice_id'), 'invoice_no': erp.get('invoice_no'),
+                           'customer_id': erp.get('customer_id'), 'order_id': erp.get('order_id'),
+                           'sync_error': bool(sync_errors)})
 
     def api_portal_pay(self):
         data = read_json(self)
@@ -3874,11 +6061,16 @@ class Handler(BaseHTTPRequestHandler):
         pnr = (data.get('pnr') or '').strip().upper()
         last = (data.get('last_name') or '').strip().lower()
         amount = float(data.get('amount') or 0)
-        if amount <= 0:
-            return self._json({'error': 'amount required'}, 400)
+        if amount <= 0 or amount != amount or amount > 10000000:
+            return self._json({'error': 'Enter a valid payment amount'}, 400)
+        psess = get_portal_session(self)
         with db() as conn:
             rows = q(conn, "SELECT * FROM pss_bookings WHERE tenant_id=? AND (pnr=? OR trip_pnr=?)", (tenant['id'], pnr, pnr))
-            if not rows or not any(last in (r.get('passenger_name') or '').lower() for r in rows):
+            if psess:
+                rows = [r for r in rows if r.get('portal_customer_id') == psess.get('customer_id')]
+                if not rows:
+                    return self._json({'error': 'PNR or passenger name does not match'}, 404)
+            elif not any(self._last_name_matches(r.get('passenger_name'), last) for r in rows):
                 return self._json({'error': 'PNR or passenger name does not match'}, 404)
             first = rows[0]
             trace_id = first.get('trace_id') or self._new_trace_id()
@@ -3891,21 +6083,37 @@ class Handler(BaseHTTPRequestHandler):
                           now_iso() if status in ('captured', 'paid') else None, data.get('notes'), trace_id, now_iso(), now_iso()))
             _ppid = q(conn, "SELECT last_insert_rowid() v", (), one=True)['v']
             paid = (q(conn, "SELECT COALESCE(SUM(amount),0) v FROM pss_payments WHERE tenant_id=? AND pnr=? AND status IN ('captured','paid')", (tenant['id'], pnr), one=True) or {}).get('v', 0)
-            total_due = sum(float(r.get('total_amount') or 0) for r in rows)
-            ps = 'paid' if paid >= total_due else ('partial' if paid > 0 else 'pending')
+            anc_due = 0.0
+            if rows:
+                marks = ','.join(['?'] * len(rows))
+                anc_due = float((q(conn, f"""SELECT COALESCE(SUM(amount),0) s FROM pss_ancillary_sales
+                                             WHERE tenant_id=? AND booking_id IN ({marks})
+                                               AND LOWER(COALESCE(status,'sold'))<>'void'""",
+                                   [tenant['id']] + [r['id'] for r in rows], one=True) or {}).get('s') or 0)
+            total_due = round(sum(float(r.get('total_amount') or 0) for r in rows) + anc_due, 2)
+            ps = 'paid' if paid >= total_due - 0.01 else ('partial' if paid > 0 else 'pending')
             conn.execute("UPDATE pss_bookings SET payment_status=?, updated_at=? WHERE tenant_id=? AND (pnr=? OR trip_pnr=?)", (ps, now_iso(), tenant['id'], pnr, pnr))
+            if ps == 'paid' and rows:
+                marks = ','.join(['?'] * len(rows))
+                conn.execute(f"UPDATE pss_ancillary_sales SET payment_status='paid', updated_at=? WHERE tenant_id=? AND booking_id IN ({marks})",
+                             [now_iso(), tenant['id']] + [r['id'] for r in rows])
             self._trace(conn, tenant['id'], 'portal', 'pss_booking', first['id'], 'payment_recorded',
                         first.get('passenger_name'), f"{payment_no} - {amount}", trace_id, self)
             for _b in rows:
                 try:
                     self._erp_sync_pss_booking(conn, tenant['id'], _b['id'], actor='portal', source='portal')
-                except Exception:
-                    pass
+                except Exception as exc:
+                    self._log_exception(exc)
             try:
                 self._erp_sync_pss_payment(conn, tenant['id'], _ppid, actor='portal', source='portal')
-            except Exception:
-                pass
-        return self._json({'ok': True, 'payment_no': payment_no, 'payment_status': ps, 'trace_id': trace_id})
+            except Exception as exc:
+                self._log_exception(exc)
+            ticketed = []
+            if status in ('captured', 'paid') and ps == 'paid':
+                ticketed = self._auto_ticket_paid_bookings(conn, tenant['id'], rows, 'portal', trace_id,
+                                                           f"Auto-ticket after {payment_no}")
+        return self._json({'ok': True, 'payment_no': payment_no, 'payment_status': ps, 'trace_id': trace_id,
+                           'ticket_numbers': ticketed})
 
     def api_portal_booking(self, qs):
         tenant = self._portal_tenant((qs.get('tenant') or [''])[0])
@@ -3913,18 +6121,32 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({'error': 'Unknown airline portal'}, 404)
         pnr = (qs.get('pnr') or [''])[0].strip().upper()
         last = (qs.get('last_name') or [''])[0].strip().lower()
+        psess = get_portal_session(self)
         with db() as conn:
             rows = q(conn, """SELECT b.*, f.flight_no, f.origin, f.destination, f.flight_date, f.dep_time, f.arr_time, f.gate
                               FROM pss_bookings b LEFT JOIN pss_flights f ON f.id=b.flight_id
                               WHERE b.tenant_id=? AND (b.pnr=? OR b.trip_pnr=?) ORDER BY b.segment_index, b.id""", (tenant['id'], pnr, pnr))
-            if not rows or not any(last in (r.get('passenger_name') or '').lower() for r in rows):
+            if psess:
+                rows = [r for r in rows if r.get('portal_customer_id') == psess.get('customer_id')]
+                if not rows:
+                    return self._json({'error': 'PNR or passenger name does not match'}, 404)
+            elif not any(self._last_name_matches(r.get('passenger_name'), last) for r in rows):
                 return self._json({'error': 'PNR or passenger name does not match'}, 404)
-            pays = q(conn, "SELECT payment_no,amount,status,method,paid_at FROM pss_payments WHERE tenant_id=? AND pnr=? ORDER BY id DESC", (tenant['id'], pnr))
+            pays = q(conn, "SELECT id,erp_payment_id,payment_no,amount,status,method,currency,paid_at FROM pss_payments WHERE tenant_id=? AND pnr=? ORDER BY id DESC", (tenant['id'], pnr))
             cis = q(conn, "SELECT ci.checkin_no,ci.pnr,ci.seat_no,ci.status,ci.checked_in_at FROM pss_checkins ci WHERE ci.tenant_id=? AND ci.pnr=? ORDER BY ci.id DESC", (tenant['id'], pnr))
             anc = q(conn, "SELECT sale_no,description,quantity,amount,currency FROM pss_ancillary_sales WHERE tenant_id=? AND booking_id IN (SELECT id FROM pss_bookings WHERE tenant_id=? AND (pnr=? OR trip_pnr=?)) ORDER BY id DESC", (tenant['id'], tenant['id'], pnr, pnr))
+            invoice_rows = q(conn, "SELECT id,invoice_no,status,total,amount_paid,balance,currency,issue_date FROM invoices WHERE tenant_id=? AND pss_booking_id IN (SELECT id FROM pss_bookings WHERE tenant_id=? AND (pnr=? OR trip_pnr=?)) ORDER BY id", (tenant['id'], tenant['id'], pnr, pnr))
+            invoices, seen_invoices = [], set()
+            for inv in invoice_rows:
+                key = inv.get('invoice_no') or inv.get('id')
+                if key in seen_invoices:
+                    continue
+                seen_invoices.add(key)
+                invoices.append(inv)
             traces = q(conn, "SELECT action,source,actor,detail,created_at FROM pss_trace WHERE tenant_id=? AND trace_id=? ORDER BY id", (tenant['id'], rows[0].get('trace_id') or ''))
         return self._json({'booking': rows[0], 'bookings': rows, 'payments': pays, 'checkins': cis,
-                           'ancillaries': anc, 'trace': traces, 'airline': tenant})
+                           'ancillaries': anc, 'invoices': invoices, 'trace': traces, 'airline': tenant,
+                           'trip_pnr': rows[0].get('trip_pnr') or pnr, 'itinerary_id': rows[0].get('itinerary_id')})
 
 
     def api_agency_offer(self, token):
@@ -4071,7 +6293,7 @@ class Handler(BaseHTTPRequestHandler):
     def api_pss_charters(self, tenant_id, method, rid=None, user_id=None):
         with db() as conn:
             if method == 'GET' and not rid:
-                rows = q(conn, """SELECT r.*, (SELECT COUNT(*) FROM pss_charter_flights f WHERE f.request_id=r.id) flights
+                rows = q(conn, """SELECT r.*, (SELECT COUNT(*) FROM pss_charter_flights f WHERE f.request_id=r.id AND f.tenant_id=r.tenant_id) flights
                                   FROM pss_charter_requests r WHERE r.tenant_id=? ORDER BY r.id DESC""", (tenant_id,))
                 return self._json({'requests': rows})
             rid = self._oid(rid)
@@ -4172,9 +6394,53 @@ class Handler(BaseHTTPRequestHandler):
     def api_pss_charter_flights(self, tenant_id):
         with db() as conn:
             rows = q(conn, """SELECT f.*, r.client_name FROM pss_charter_flights f
-                              LEFT JOIN pss_charter_requests r ON r.id=f.request_id
+                              LEFT JOIN pss_charter_requests r ON r.id=f.request_id AND r.tenant_id=f.tenant_id
                               WHERE f.tenant_id=? ORDER BY f.id DESC""", (tenant_id,))
         return self._json({'charter_flights': rows})
+
+    def api_pss_charter_flight_mutate(self, tenant_id, fid, method, user_id=None):
+        allowed = ('charter_no', 'request_id', 'flight_no', 'origin', 'destination', 'flight_date',
+                   'dep_time', 'arr_time', 'aircraft', 'seats', 'charterer', 'contract_no',
+                   'total_amount', 'amount_paid', 'currency', 'pss_flight_id', 'status', 'notes')
+        with db() as conn:
+            if method == 'GET':
+                row = q(conn, "SELECT * FROM pss_charter_flights WHERE id=? AND tenant_id=?", (self._oid(fid), tenant_id), one=True)
+                return self._json({'charter_flight': row}) if row else self._json({'error': 'Charter flight not found'}, 404)
+            if method == 'DELETE':
+                fid = self._oid(fid)
+                conn.execute("DELETE FROM pss_charter_passengers WHERE tenant_id=? AND charter_id=?", (tenant_id, fid))
+                conn.execute("DELETE FROM pss_charter_flights WHERE id=? AND tenant_id=?", (fid, tenant_id))
+                return self._json({'ok': True})
+            data = read_json(self)
+            vals = {}
+            for key in allowed:
+                if key in data:
+                    vals[key] = self._oid(data[key]) if key.endswith('_id') else data[key]
+            if vals.get('request_id') and not q(conn, "SELECT 1 FROM pss_charter_requests WHERE id=? AND tenant_id=?", (vals['request_id'], tenant_id), one=True):
+                return self._json({'error': 'Charter request not found'}, 404)
+            if vals.get('pss_flight_id') and not q(conn, "SELECT 1 FROM pss_flights WHERE id=? AND tenant_id=?", (vals['pss_flight_id'], tenant_id), one=True):
+                return self._json({'error': 'Flight not found'}, 404)
+            ts = now_iso()
+            if method == 'POST':
+                if not vals.get('charter_no'):
+                    n = q(conn, "SELECT COUNT(*) c FROM pss_charter_flights WHERE tenant_id=?", (tenant_id,), one=True)['c'] + 1
+                    vals['charter_no'] = f"CHF-{ts[:4]}-{n:05d}"
+                vals.setdefault('status', 'scheduled')
+                vals.setdefault('currency', 'USD')
+                cols = list(vals.keys()) + ['tenant_id', 'created_by', 'created_at', 'updated_at']
+                params = list(vals.values()) + [tenant_id, user_id, ts, ts]
+                conn.execute(f"INSERT INTO pss_charter_flights({','.join(cols)}) VALUES ({','.join(['?']*len(cols))})", params)
+                new_id = q(conn, "SELECT last_insert_rowid() v", (), one=True)['v']
+                return self._json({'ok': True, 'id': new_id})
+            fid = self._oid(fid)
+            if not q(conn, "SELECT 1 FROM pss_charter_flights WHERE id=? AND tenant_id=?", (fid, tenant_id), one=True):
+                return self._json({'error': 'Charter flight not found'}, 404)
+            if not vals:
+                return self._json({'ok': True})
+            vals['updated_at'] = ts
+            conn.execute(f"UPDATE pss_charter_flights SET {','.join(c+'=?' for c in vals)} WHERE id=? AND tenant_id=?",
+                         list(vals.values()) + [fid, tenant_id])
+            return self._json({'ok': True})
 
     def api_pss_trace(self, tenant_id, qs):
         source = (qs.get('source') or [''])[0]
@@ -4261,15 +6527,21 @@ class Handler(BaseHTTPRequestHandler):
             desc = f"Baggage {weight}kg ({pieces} piece(s)) · free {free_kg}kg · excess {excess}kg"
             sale_no = self._psn('BAG')
             trace_id = b.get('trace_id') or self._new_trace_id()
-            conn.execute("""INSERT INTO pss_ancillary_sales(tenant_id,sale_no,booking_id,ancillary_id,description,quantity,unit_price,amount,currency,status,payment_status,trace_id,created_by,created_at,updated_at)
+            cur = conn.execute("""INSERT INTO pss_ancillary_sales(tenant_id,sale_no,booking_id,ancillary_id,description,quantity,unit_price,amount,currency,status,payment_status,trace_id,created_by,created_at,updated_at)
                             VALUES (?,?,?,NULL,?,1,?,?,?,'sold',?,?,?,?,?)""",
                          (tenant_id, sale_no, bid, desc, rate, charge, b.get('currency') or 'USD',
                           data.get('payment_status') or 'pending', trace_id, user_id, now_iso(), now_iso()))
-            sid = q(conn, "SELECT last_insert_rowid() v", (), one=True)['v']
+            sid = cur.lastrowid
             self._trace(conn, tenant_id, 'counter', 'pss_ancillary_sale', sid, 'baggage_allocated', user_id,
                         f"{desc} · charge {charge}", trace_id, self)
+            ci = q(conn, """SELECT ci.*, f.flight_no, f.origin, f.destination, bk.trace_id booking_trace
+                            FROM pss_checkins ci LEFT JOIN pss_flights f ON f.id=ci.flight_id
+                            LEFT JOIN pss_bookings bk ON bk.id=ci.booking_id
+                            WHERE ci.tenant_id=? AND ci.booking_id=? ORDER BY ci.id DESC LIMIT 1""", (tenant_id, bid), one=True)
+            tags = self._sync_baggage_items(conn, tenant_id, ci, data.get('bag_tags') or data.get('bag_tag') or '',
+                                            pieces, user_id, weight, sale_no, ci.get('booking_trace') or trace_id) if ci else []
         return self._json({'ok': True, 'sale_id': sid, 'sale_no': sale_no, 'free_kg': free_kg,
-                           'excess_kg': excess, 'rate_per_kg': rate, 'charge': charge})
+                           'excess_kg': excess, 'rate_per_kg': rate, 'charge': charge, 'bag_tags': tags})
 
     def api_pss_airport_info(self, tenant_id, qs):
         code = (qs.get('airport') or qs.get('code') or [''])[0].strip().upper()
@@ -4380,6 +6652,42 @@ class Handler(BaseHTTPRequestHandler):
                               ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 ELSE 2 END, id DESC LIMIT 50""", (tenant['id'],))
         return self._json({'disruptions': rows})
 
+    def api_portal_unused_tickets(self, qs):
+        tenant = self._portal_tenant((qs.get('tenant') or [''])[0])
+        if not tenant:
+            return self._json({'error': 'Unknown airline portal'}, 404)
+        with db() as conn:
+            self._sync_unused_tickets(conn, tenant['id'])
+            rows = q(conn, """SELECT ticket_no, pnr, traveler_name, airline, issue_date, travel_date,
+                                     expiry_date, ticket_status, refund_status, value, currency
+                              FROM unused_tickets WHERE tenant_id=?
+                              ORDER BY CASE ticket_status WHEN 'unused' THEN 0 WHEN 'expired' THEN 1 ELSE 2 END,
+                                       expiry_date ASC, id DESC LIMIT 100""", (tenant['id'],))
+        return self._json({'unused_tickets': rows})
+
+    def api_portal_ticket_status(self, qs):
+        tenant = self._portal_tenant((qs.get('tenant') or [''])[0])
+        if not tenant:
+            return self._json({'error': 'Unknown airline portal'}, 404)
+        with db() as conn:
+            rows = q(conn, """SELECT b.ticket_number ticket_no, b.passenger_name, b.pnr,
+                                     f.flight_no, b.ticket_status, b.issue_date, b.updated_at
+                              FROM pss_bookings b LEFT JOIN pss_flights f ON f.id=b.flight_id
+                              WHERE b.tenant_id=? AND b.ticket_number IS NOT NULL AND b.ticket_number<>''
+                              ORDER BY b.id DESC LIMIT 100""", (tenant['id'],))
+        return self._json({'ticket_status': rows})
+
+    def api_portal_suppliers(self, qs):
+        tenant = self._portal_tenant((qs.get('tenant') or [''])[0])
+        if not tenant:
+            return self._json({'error': 'Unknown airline portal'}, 404)
+        with db() as conn:
+            rows = q(conn, """SELECT name supplier_name, COALESCE(supplier_type, type, 'General') category,
+                                     contact_person, email, phone, balance, currency, status
+                              FROM contacts
+                              WHERE tenant_id=? AND LOWER(COALESCE(contact_type,'supplier'))='supplier'
+                                AND COALESCE(is_active,1)=1 ORDER BY name LIMIT 100""", (tenant['id'],))
+        return self._json({'suppliers': rows})
 
     def api_pss_partner_workspace(self, tenant_id, sess):
         sess = sess or {}
@@ -4486,9 +6794,15 @@ class Handler(BaseHTTPRequestHandler):
             token = make_token()
             conn.execute("INSERT INTO portal_sessions(token,tenant_id,customer_id,created_at,expires_at,client_hash) VALUES (?,?,?,?,?,?)",
                          (token, tenant['id'], c['id'], now_iso(), _session_expiry(), _client_hash(self)))
+            try:
+                conn.execute("""UPDATE pss_bookings SET portal_customer_id=?, updated_at=?
+                                WHERE tenant_id=? AND portal_customer_id IS NULL AND lower(COALESCE(contact_email,''))=?""",
+                             (c['id'], now_iso(), tenant['id'], email))
+            except Exception:
+                pass
         _note_login_success(key)
         flags = '; Secure' if _use_secure_cookie(self) else ''
-        return self._json({'ok': True, 'token': token, 'customer': {'id': c['id'], 'full_name': c['full_name'], 'email': c['email']}},
+        return self._json({'ok': True, 'token': token, 'customer': {'id': c['id'], 'full_name': c['full_name'], 'email': c['email'], 'phone': c.get('phone')}},
                           200, headers={'Set-Cookie': f'psid={token}; Path=/; HttpOnly; SameSite=Lax{flags}'})
 
     def api_portal_logout(self):
@@ -4503,37 +6817,104 @@ class Handler(BaseHTTPRequestHandler):
         if not sess:
             return self._json({'error': 'Not signed in'}, 401)
         with db() as conn:
-            rows = q(conn, """SELECT b.id,b.pnr,b.trip_pnr,b.flight_no,b.origin,b.destination,b.flight_date,b.dep_time,
-                                     b.passenger_name,b.ticket_number,b.ticket_status,b.payment_status,b.booking_status,b.total_amount,b.currency
-                              FROM pss_bookings b WHERE b.tenant_id=? AND b.portal_customer_id=? ORDER BY b.id DESC LIMIT 100""",
+            rows = q(conn, """SELECT b.id,b.pnr,b.trip_pnr,b.itinerary_id,f.flight_no,f.origin,f.destination,f.flight_date,f.dep_time,
+                                     b.passenger_name,b.ticket_number,b.ticket_status,b.payment_status,b.booking_status,b.total_amount,b.currency,
+                                     t.code tenant_code
+                              FROM pss_bookings b LEFT JOIN pss_flights f ON f.id=b.flight_id
+                              LEFT JOIN tenants t ON t.id=b.tenant_id
+                              WHERE b.tenant_id=? AND b.portal_customer_id=? ORDER BY b.id DESC LIMIT 100""",
                      (sess['tenant_id'], sess['customer_id']))
-        return self._json({'customer': {'id': sess['customer_id'], 'full_name': sess['full_name'], 'email': sess['email']},
+            pc = q(conn, "SELECT full_name,email,phone FROM portal_customers WHERE id=? AND tenant_id=?",
+                   (sess['customer_id'], sess['tenant_id']), one=True) or {}
+        return self._json({'customer': {'id': sess['customer_id'], 'full_name': pc.get('full_name') or sess['full_name'],
+                                        'email': pc.get('email') or sess['email'], 'phone': pc.get('phone')},
                            'bookings': rows})
 
     def api_portal_documents_get(self, qs):
         pnr = (qs.get('pnr') or [''])[0].strip().upper()
         last = (qs.get('last_name') or [''])[0].strip().lower()
+        tcode = (qs.get('tenant') or [''])[0].strip()
         sess = get_portal_session(self)
+        tenant = self._portal_tenant(tcode) if tcode else None
         with db() as conn:
-            if pnr and last:
-                rows = q(conn, """SELECT d.id,d.doc_type,d.doc_no,d.title,d.file_name,d.created_at FROM pss_travel_documents d
-                                  WHERE d.pnr=? AND EXISTS (SELECT 1 FROM pss_bookings b WHERE b.id=d.booking_id AND LOWER(b.passenger_name) LIKE ?)
-                                  ORDER BY d.id DESC""", (pnr, '%' + last + '%'))
+            if pnr and (last or sess):
+                if not tenant:
+                    tr = q(conn, "SELECT tenant_id FROM pss_bookings WHERE pnr=? OR trip_pnr=? ORDER BY id LIMIT 1", (pnr, pnr), one=True)
+                    tenant = q(conn, "SELECT * FROM tenants WHERE id=?", (tr['tenant_id'],), one=True) if tr else None
+                if not tenant:
+                    return self._json({'documents': []})
+                tid = tenant['id']
+                bookings = q(conn, """SELECT id,pnr,passenger_name,portal_customer_id FROM pss_bookings
+                                      WHERE tenant_id=? AND (pnr=? OR trip_pnr=?)""", (tid, pnr, pnr))
+                allowed = [b['id'] for b in bookings
+                           if (sess and b.get('portal_customer_id') == sess.get('customer_id'))
+                           or (last and self._last_name_matches(b.get('passenger_name'), last))]
+                if not allowed:
+                    return self._json({'documents': []})
+                marks = ','.join(['?'] * len(allowed))
+                rows = q(conn, f"""SELECT d.id,d.doc_type,d.doc_no,d.title,d.file_name,d.mime_type,d.created_at,
+                                          (d.file_data IS NOT NULL) has_file
+                                   FROM pss_travel_documents d WHERE d.tenant_id=? AND d.booking_id IN ({marks})
+                                   ORDER BY d.id DESC""", [tid] + allowed)
             elif sess:
-                rows = q(conn, """SELECT d.id,d.doc_type,d.doc_no,d.title,d.file_name,d.created_at FROM pss_travel_documents d
+                rows = q(conn, """SELECT d.id,d.doc_type,d.doc_no,d.title,d.file_name,d.mime_type,d.created_at,
+                                         (d.file_data IS NOT NULL) has_file
+                                  FROM pss_travel_documents d
                                   WHERE d.tenant_id=? AND d.booking_id IN (SELECT id FROM pss_bookings WHERE tenant_id=? AND portal_customer_id=?)
                                   ORDER BY d.id DESC""", (sess['tenant_id'], sess['tenant_id'], sess['customer_id']))
             else:
                 return self._json({'error': 'Sign in or provide PNR and surname'}, 401)
         return self._json({'documents': rows})
 
+    def api_portal_document_download(self, did, qs):
+        sess = get_portal_session(self)
+        pnr = (qs.get('pnr') or [''])[0].strip().upper()
+        last = (qs.get('last_name') or [''])[0].strip().lower()
+        with db() as conn:
+            doc = q(conn, "SELECT * FROM pss_travel_documents WHERE id=?", (self._oid(did),), one=True)
+            if not doc:
+                return self._json({'error': 'Document not found'}, 404)
+            b = q(conn, "SELECT * FROM pss_bookings WHERE id=? AND tenant_id=?", (doc['booking_id'], doc['tenant_id']), one=True)
+            allowed = bool(sess and sess.get('tenant_id') == doc['tenant_id'] and b
+                           and b.get('portal_customer_id') == sess.get('customer_id'))
+            if not allowed and pnr and last and b:
+                trip = q(conn, """SELECT id,passenger_name FROM pss_bookings
+                                  WHERE tenant_id=? AND (pnr=? OR trip_pnr=?)""",
+                         (doc['tenant_id'], pnr, pnr))
+                allowed = any(x['id'] == doc['booking_id'] and self._last_name_matches(x.get('passenger_name'), last)
+                              for x in trip)
+            if not allowed:
+                return self._json({'error': 'Access denied'}, 403)
+            if not doc.get('file_data'):
+                return self._json({'error': 'No file attached to this document'}, 404)
+            ctype = doc.get('mime_type') or 'application/octet-stream'
+            fname = str(doc.get('file_name') or 'travel-document').replace('"', '').replace('\r', '').replace('\n', '')
+            inline = (qs.get('inline') or [''])[0].lower() in ('1', 'true', 'yes')
+            disp = 'inline' if inline else 'attachment'
+            return self._send(bytes(doc['file_data']), 200, ctype,
+                              {'Content-Disposition': f'{disp}; filename="{fname}"'})
+
     def api_portal_documents_post(self):
         data = read_json(self)
+        tenant = self._portal_tenant(data.get('tenant'))
+        if not tenant:
+            return self._json({'error': 'Unknown airline portal'}, 404)
         pnr = (data.get('pnr') or '').strip().upper()
+        last = (data.get('last_name') or '').strip().lower()
+        sess = get_portal_session(self)
         with db() as conn:
-            b = q(conn, "SELECT * FROM pss_bookings WHERE pnr=? OR trip_pnr=? ORDER BY id LIMIT 1", (pnr, pnr), one=True)
+            b = q(conn, "SELECT * FROM pss_bookings WHERE tenant_id=? AND (pnr=? OR trip_pnr=?) ORDER BY id LIMIT 1",
+                  (tenant['id'], pnr, pnr), one=True)
             if not b:
                 return self._json({'error': 'PNR not found'}, 404)
+            if sess:
+                if b.get('portal_customer_id') != sess.get('customer_id'):
+                    return self._json({'error': 'Access denied'}, 403)
+            elif last:
+                if not self._last_name_matches(b.get('passenger_name'), last):
+                    return self._json({'error': 'PNR or passenger name does not match'}, 404)
+            else:
+                return self._json({'error': 'Sign in or provide surname'}, 401)
             file_data = None
             if data.get('file_base64'):
                 raw = data['file_base64']
@@ -4560,20 +6941,30 @@ class Handler(BaseHTTPRequestHandler):
         if not tenant:
             return self._json({'error': 'Unknown airline portal'}, 404)
         pnr = (data.get('pnr') or '').strip().upper()
+        last = (data.get('last_name') or '').strip().lower()
         with db() as conn:
             bookings = q(conn, "SELECT * FROM pss_bookings WHERE tenant_id=? AND (pnr=? OR trip_pnr=?)", (tenant['id'], pnr, pnr))
             if not bookings:
                 return self._json({'error': 'PNR not found'}, 404)
+            if sess:
+                bookings = [b for b in bookings if b.get('portal_customer_id') == sess.get('customer_id')]
+                if not bookings:
+                    return self._json({'error': 'Access denied'}, 403)
+            elif last:
+                if not any(self._last_name_matches(b.get('passenger_name'), last) for b in bookings):
+                    return self._json({'error': 'PNR or passenger name does not match'}, 404)
+            else:
+                return self._json({'error': 'Passenger last name required'}, 403)
             amount = float(data.get('amount') or sum(float(b.get('total_amount') or 0) for b in bookings))
             cur = data.get('currency') or bookings[0].get('currency') or 'USD'
             gw = self._pss_flw_gateway(conn, tenant['id'])
             secret = (gw or {}).get('secret_key') or ''
             tx_ref = 'PSS-' + os.urandom(6).hex().upper()
+            notes = f"{data.get('email') or ''} {data.get('phone') or ''}" + (' DEMO' if not secret else '')
             conn.execute("""INSERT INTO pss_payments(tenant_id,payment_no,booking_id,pnr,channel_id,amount,currency,method,reference,gateway_ref,status,notes,booking_source,created_at,updated_at)
                             VALUES (?,?,?,?,?,?,?,?,?,?,'pending',?,'portal',?,?)""",
                          (tenant['id'], tx_ref, bookings[0]['id'], pnr, bookings[0].get('channel_id'), amount, cur,
-                          'flutterwave', data.get('reference'), tx_ref,
-                          f"{data.get('email') or ''} {data.get('phone') or ''}", now_iso(), now_iso()))
+                          'flutterwave', data.get('reference'), tx_ref, notes, now_iso(), now_iso()))
             if not secret:
                 return self._json({'ok': True, 'demo': True, 'tx_ref': tx_ref, 'amount': amount,
                                    'url': f'/api/pss/payments/flutterwave/verify?tx_ref={tx_ref}&status=successful'})
@@ -4591,12 +6982,30 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({'ok': bool(link), 'tx_ref': tx_ref, 'url': link,
                                'error': (resp or {}).get('message') if not link else None}, 200 if link else 502)
 
+    def _auto_ticket_paid_bookings(self, conn, tenant_id, rows, actor, trace_id, reason):
+        ticketed = []
+        for booking in rows or []:
+            if booking.get('ticket_status') == 'issued':
+                continue
+            ticket = self._pss_next_ticket(conn, tenant_id, booking.get('channel_id'), booking.get('airport_code'))
+            if not ticket:
+                continue
+            conn.execute("UPDATE pss_bookings SET ticket_number=?,ticket_status='issued',updated_at=? WHERE id=? AND tenant_id=?",
+                         (ticket, now_iso(), booking['id'], tenant_id))
+            conn.execute("""INSERT INTO pss_ticket_events(tenant_id,booking_id,pnr,previous_status,ticket_status,reason,actor,trace_id,created_at)
+                            VALUES (?,?,?,?,?,?,?,?,?)""",
+                         (tenant_id, booking['id'], booking.get('pnr'), booking.get('ticket_status'), 'issued', reason, actor, trace_id, now_iso()))
+            self._activity(conn, tenant_id, 'pss_booking', booking['id'], 'ticket_issued', ticket, actor)
+            self._trace(conn, tenant_id, actor, 'pss_booking', booking['id'], 'ticket_issued', actor, ticket, trace_id, self)
+            ticketed.append(ticket)
+        return ticketed
+
     def _apply_pss_flw(self, conn, tx_ref, gateway_data=None, status='successful'):
         pay = q(conn, "SELECT * FROM pss_payments WHERE gateway_ref=? OR payment_no=?", (tx_ref, tx_ref), one=True)
         if not pay or pay.get('status') in ('captured', 'paid'):
             return False
         conn.execute("UPDATE pss_payments SET status='captured', captured_at=?, paid_at=COALESCE(paid_at,?), gateway_ref=?, raw_json=? WHERE id=?",
-                     (now_iso(), tx_ref, json.dumps(gateway_data or {}, default=str), pay['id']))
+                     (now_iso(), now_iso(), tx_ref, json.dumps(gateway_data or {}, default=str), pay['id']))
         rows = q(conn, "SELECT * FROM pss_bookings WHERE tenant_id=? AND (pnr=? OR trip_pnr=?)", (pay['tenant_id'], pay['pnr'], pay['pnr']))
         total = sum(float(r.get('total_amount') or 0) for r in rows)
         paid = (q(conn, "SELECT COALESCE(SUM(amount),0) v FROM pss_payments WHERE tenant_id=? AND pnr=? AND status IN ('captured','paid')", (pay['tenant_id'], pay['pnr']), one=True) or {}).get('v', 0)
@@ -4604,8 +7013,12 @@ class Handler(BaseHTTPRequestHandler):
         conn.execute("UPDATE pss_bookings SET payment_status=?,updated_at=? WHERE tenant_id=? AND (pnr=? OR trip_pnr=?)",
                      (ps, now_iso(), pay['tenant_id'], pay['pnr'], pay['pnr']))
         if rows:
+            trace_id = rows[0].get('trace_id') or self._new_trace_id()
             self._trace(conn, pay['tenant_id'], 'flutterwave', 'pss_booking', rows[0]['id'], 'payment_captured',
-                        'flutterwave', tx_ref, rows[0].get('trace_id'), None)
+                        'flutterwave', tx_ref, trace_id, None)
+            if ps == 'paid':
+                self._auto_ticket_paid_bookings(conn, pay['tenant_id'], rows, 'flutterwave', trace_id,
+                                                f"Auto-ticket after {tx_ref}")
         for _b in rows:
             try:
                 self._erp_sync_pss_booking(conn, pay['tenant_id'], _b['id'], actor='flutterwave', source=_b.get('booking_source') or 'portal')
@@ -4626,12 +7039,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({'error': 'Payment reference not found'}, 404)
             gw = self._pss_flw_gateway(conn, pay['tenant_id'])
             secret = (gw or {}).get('secret_key') or ''
-            verified = status.lower() in ('successful', 'success') or qs.get('status') == ['successful']
+            verified = False
             gateway_data = {'tx_ref': tx_ref, 'status': status}
-            if secret and not verified:
+            if secret:
                 vstatus, vresp = flutterwave_verify(secret, tx_ref=tx_ref)
                 verified = vstatus == 200 and str((vresp or {}).get('data', {}).get('status')).lower() == 'successful'
                 gateway_data = vresp or gateway_data
+            else:
+                demo_payment = (str(pay.get('method') or '') == 'flutterwave'
+                                and str(pay.get('gateway_ref') or '') == str(tx_ref)
+                                and 'DEMO' in str(pay.get('notes') or ''))
+                verified = demo_payment and status.lower() in ('successful', 'success')
             if verified:
                 self._apply_pss_flw(conn, tx_ref, gateway_data, 'successful')
         return self._json({'ok': True, 'verified': bool(verified), 'tx_ref': tx_ref})
@@ -4685,10 +7103,11 @@ class Handler(BaseHTTPRequestHandler):
             secret = (gw or {}).get('secret_key') or ''
             amount = float(data.get('amount') or b.get('total_amount') or 0)
             tx_ref = 'PSS-' + os.urandom(6).hex().upper()
-            conn.execute("""INSERT INTO pss_payments(tenant_id,payment_no,booking_id,pnr,channel_id,amount,currency,method,reference,gateway_ref,status,booking_source,created_at,updated_at)
-                            VALUES (?,?,?,?,?,?,?,'flutterwave',?,?,'pending','agency_direct',?,?)""",
+            conn.execute("""INSERT INTO pss_payments(tenant_id,payment_no,booking_id,pnr,channel_id,amount,currency,method,reference,gateway_ref,status,notes,booking_source,created_at,updated_at)
+                            VALUES (?,?,?,?,?,?,?,'flutterwave',?,?,'pending',?,'agency_direct',?,?)""",
                          (tenant_id, tx_ref, bid, b['pnr'], b.get('channel_id'), amount,
-                          data.get('currency') or b.get('currency') or 'USD', data.get('reference'), tx_ref, now_iso(), now_iso()))
+                          data.get('currency') or b.get('currency') or 'USD', data.get('reference'), tx_ref,
+                          ('DEMO' if not secret else ''), now_iso(), now_iso()))
             if not secret:
                 return self._json({'ok': True, 'demo': True, 'tx_ref': tx_ref,
                                    'url': f'/api/pss/payments/flutterwave/verify?tx_ref={tx_ref}&status=successful'})
@@ -4782,14 +7201,643 @@ def _rotate_legacy_credentials():
         conn.close()
 
 
+class PartnerAPIHandler(Handler):
+
+    def _public_api_key(self):
+        token = (self.headers.get('X-API-Key') or '').strip()
+        if not token:
+            auth = (self.headers.get('Authorization') or '').strip()
+            if auth.lower().startswith('bearer '):
+                token = auth[7:].strip()
+        if not token:
+            return None
+        digest = _hash_api_key(token)
+        with db() as conn:
+            row = q(conn, "SELECT * FROM pss_api_keys WHERE tenant_id IS NOT NULL AND token_hash=? AND status='active'", (digest,), one=True)
+            if not row:
+                return None
+            expires = row.get('expires_at')
+            if expires and str(expires) < now_iso():
+                return None
+            conn.execute("UPDATE pss_api_keys SET last_used_at=? WHERE id=?", (now_iso(), row['id']))
+            return dict(row)
+
+    def api_public_docs(self):
+        return self._json({
+            'version': '1.0',
+            'auth': 'Send X-API-Key (or Authorization: Bearer) on every offer/order request.',
+            'base_url': '/api/public/v1',
+            'endpoints': [
+                {'method': 'POST', 'path': '/api/public/v1/offers', 'description': 'Quote flights and create a timed offer.',
+                 'example': {'flights': [{'flight_id': 1, 'cabin': 'Y'}], 'passenger_count': 1, 'pos': 'DIRECT', 'currency': 'USD', 'ttl_minutes': 30}},
+                {'method': 'GET', 'path': '/api/public/v1/offers/{token}', 'description': 'Retrieve an offer and check expiry.', 'example': {}},
+                {'method': 'POST', 'path': '/api/public/v1/offers/{token}/orders', 'description': 'Convert an active offer into bookings and an order.',
+                 'example': {'passengers': [{'name': 'John Doe', 'type': 'ADT'}], 'contact': {'email': 'john@example.com', 'phone': '+256700000000'}, 'idempotency_key': 'booking-1001'}},
+                {'method': 'GET', 'path': '/api/public/v1/orders/{order_no}', 'description': 'Retrieve order and linked PNRs.', 'example': {}},
+                {'method': 'POST', 'path': '/api/public/v1/orders/{order_no}/cancel', 'description': 'Cancel an order and restore seats.', 'example': {'reason': 'Customer request'}},
+            ],
+            'webhook_events': list(WEBHOOK_EVENTS),
+            'webhook_headers': ['X-Fayaka-Event', 'X-Fayaka-Signature: sha256=<HMAC-SHA256 body signature>'],
+            'errors': {'401': 'Missing or invalid API key', '404': 'Offer/order not found', '409': 'Expired offer, insufficient seats, or duplicate idempotency key', '422': 'Validation error'},
+        })
+
+    def api_public_offer_create(self):
+        key = self._public_api_key()
+        if not key:
+            return self._json({'error': 'Invalid API key'}, 401)
+        data = read_json(self)
+        flights = data.get('flights') or []
+        if isinstance(flights, dict):
+            flights = [flights]
+        try:
+            pax_count = max(1, min(9, int(data.get('passenger_count') or 1)))
+        except Exception:
+            return self._json({'error': 'passenger_count must be a number'}, 422)
+        if not flights:
+            return self._json({'error': 'At least one flight is required'}, 422)
+        currency = str(data.get('currency') or 'USD').upper()
+        pos = str(data.get('pos') or 'DIRECT').upper()
+        channel = str(data.get('channel') or 'api')
+        try:
+            ttl = int(data.get('ttl_minutes') or 30)
+            if ttl < 1 or ttl > 1440:
+                raise ValueError('ttl_minutes must be between 1 and 1440')
+            expires_at = (datetime.utcnow() + timedelta(minutes=ttl)).replace(microsecond=0).isoformat() + 'Z'
+            with db() as conn:
+                priced = []
+                total = 0.0
+                for item in flights:
+                    fid = int(item.get('flight_id') or item.get('id') or 0)
+                    flight = q(conn, "SELECT * FROM pss_flights WHERE id=? AND tenant_id=?", (fid, key['tenant_id']), one=True)
+                    if not flight:
+                        raise ValueError(f"Flight {fid} was not found")
+                    if str(flight.get('status') or '').lower() in ('cancelled', 'closed'):
+                        raise ValueError(f"Flight {flight.get('flight_no')} is not available")
+                    if int(flight.get('available_seats') or 0) < pax_count:
+                        raise ValueError(f"Flight {flight.get('flight_no')} has insufficient seats")
+                    cabin = str(item.get('cabin') or item.get('fare_class') or 'Y').upper()
+                    unit = round(float(flight.get('base_fare') or 0) * self._portal_cabin_multiplier(cabin), 2)
+                    taxes = round(unit * 0.05, 2)
+                    amount = round((unit + taxes) * pax_count, 2)
+                    total += amount
+                    priced.append({'flight_id': fid, 'flight_no': flight.get('flight_no'), 'flight_date': flight.get('flight_date'),
+                                   'origin': flight.get('origin'), 'destination': flight.get('destination'), 'dep_time': flight.get('dep_time'),
+                                   'arr_time': flight.get('arr_time'), 'cabin': cabin, 'unit_price': unit, 'taxes': taxes, 'amount': amount})
+                offer_no = self._psn('OFF')
+                token = make_token()
+                pricing = {'segments': priced, 'currency': currency, 'passenger_count': pax_count, 'taxes': round(sum(float(s['taxes']) for s in priced) * pax_count, 2)}
+                conn.execute("""INSERT INTO pss_offers
+                    (tenant_id,offer_no,token,api_key_id,channel,pos,currency,passenger_count,segments_json,pricing_json,total_amount,status,expires_at,created_by,created_at,updated_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,'active',?,?,?,?)""",
+                    (key['tenant_id'], offer_no, token, key['id'], channel, pos, currency, pax_count,
+                     json.dumps(priced), json.dumps(pricing), round(total, 2), expires_at, None, now_iso(), now_iso()))
+                row = q(conn, "SELECT * FROM pss_offers WHERE token=?", (token,), one=True)
+                self._trace(conn, key['tenant_id'], 'api', 'offer', offer_no, 'offer_created', actor=key.get('name') or 'api',
+                            detail=json.dumps({'pos': pos, 'passenger_count': pax_count}), handler=self)
+            payload = {'offer_no': offer_no, 'token': token, 'status': 'active', 'total_amount': round(total, 2), 'currency': currency}
+            _webhook_event(key['tenant_id'], 'offer.created', payload, offer_no)
+            return self._json({'offer': {'offer_no': offer_no, 'token': token, 'status': 'active', 'expires_at': expires_at,
+                                         'currency': currency, 'passenger_count': pax_count, 'total_amount': round(total, 2),
+                                         'segments': priced, 'pricing': pricing}}, 201)
+        except ValueError as exc:
+            return self._json({'error': str(exc)}, 422)
+        except Exception as exc:
+            return self._json({'error': f'Could not create offer: {exc}'}, 500)
+
+    def api_public_offer_get(self, token):
+        key = self._public_api_key()
+        if not key:
+            return self._json({'error': 'Invalid API key'}, 401)
+        with db() as conn:
+            row = q(conn, "SELECT * FROM pss_offers WHERE token=? AND tenant_id=?", (token, key['tenant_id']), one=True)
+            if not row:
+                return self._json({'error': 'Offer not found'}, 404)
+            if row.get('status') == 'active' and row.get('expires_at') and str(row['expires_at']) < now_iso():
+                conn.execute("UPDATE pss_offers SET status='expired',updated_at=? WHERE id=?", (now_iso(), row['id']))
+                row['status'] = 'expired'
+            pricing = _json_load(row.get('pricing_json'), {})
+            segments = _json_load(row.get('segments_json'), [])
+        return self._json({'offer': {'offer_no': row.get('offer_no'), 'token': row.get('token'), 'status': row.get('status'),
+                                     'expires_at': row.get('expires_at'), 'total_amount': row.get('total_amount'),
+                                     'currency': row.get('currency'), 'passenger_count': row.get('passenger_count'),
+                                     'segments': segments, 'pricing': pricing}})
+
+    def api_public_order_create(self, token):
+        key = self._public_api_key()
+        if not key:
+            return self._json({'error': 'Invalid API key'}, 401)
+        data = read_json(self)
+        with db() as conn:
+            offer = q(conn, "SELECT * FROM pss_offers WHERE token=? AND tenant_id=?", (token, key['tenant_id']), one=True)
+            if not offer:
+                return self._json({'error': 'Offer not found'}, 404)
+            if offer.get('status') == 'ordered' and offer.get('order_id'):
+                order = q(conn, "SELECT * FROM pss_orders WHERE id=?", (offer['order_id'],), one=True)
+                return self._json({'order': {'order_no': order.get('order_no'), 'pnr': order.get('pnr'), 'status': order.get('status')}, 'duplicate': True})
+            if offer.get('status') != 'active':
+                return self._json({'error': f"Offer is {offer.get('status')}"}, 409)
+            if offer.get('expires_at') and str(offer['expires_at']) < now_iso():
+                conn.execute("UPDATE pss_offers SET status='expired',updated_at=? WHERE id=?", (now_iso(), offer['id']))
+                return self._json({'error': 'Offer has expired'}, 409)
+            pax_count = int(offer.get('passenger_count') or 1)
+            passengers = data.get('passengers') or []
+            if isinstance(passengers, dict):
+                passengers = [passengers]
+            while len(passengers) < pax_count:
+                passengers.append({'name': f'PAX {len(passengers)+1}', 'type': 'ADT'})
+            passengers = passengers[:pax_count]
+            contact = data.get('contact') or {}
+            idem = str(data.get('idempotency_key') or '').strip()
+            order_no = self._psn('ORD')
+            if idem:
+                order_no = 'ORD-' + hashlib.sha256(f"{key['id']}:{idem}".encode('utf-8')).hexdigest()[:10].upper()
+                existing = q(conn, "SELECT * FROM pss_orders WHERE tenant_id=? AND order_no=?", (key['tenant_id'], order_no), one=True)
+                if existing:
+                    return self._json({'order': {'order_no': existing.get('order_no'), 'pnr': existing.get('pnr'), 'status': existing.get('status')}, 'duplicate': True})
+            def alloc_pnr():
+                for _ in range(30):
+                    candidate = ''.join(secrets.choice('ABCDEFGHJKLMNPQRSTUVWXYZ23456789') for _ in range(6))
+                    used = q(conn, """SELECT 1 used FROM pss_bookings WHERE tenant_id=? AND (pnr=? OR trip_pnr=?)
+                                      UNION SELECT 1 FROM pss_orders WHERE tenant_id=? AND pnr=? LIMIT 1""",
+                             (key['tenant_id'], candidate, candidate, key['tenant_id'], candidate), one=True)
+                    if not used:
+                        return candidate
+                raise ValueError('Could not allocate PNR')
+
+            segments = _json_load(offer.get('segments_json'), [])
+            if not segments:
+                return self._json({'error': 'Offer has no segments'}, 422)
+            trip_pnr = alloc_pnr()
+            booking_ids = []
+            total_amount = 0.0
+            conn.execute('SAVEPOINT api_order_create')
+            try:
+                for pax in passengers:
+                    pax_name = str((pax.get('name') if isinstance(pax, dict) else pax) or f'PAX {len(booking_ids)+1}')
+                    pax_type = str((pax.get('type') if isinstance(pax, dict) else 'ADT') or 'ADT')
+                    for seg in segments:
+                        fid = int(seg.get('flight_id') or 0)
+                        cur = conn.execute("""UPDATE pss_flights SET available_seats=available_seats-1,updated_at=?
+                                              WHERE id=? AND tenant_id=? AND available_seats>0
+                                                AND COALESCE(status,'scheduled') NOT IN ('cancelled','closed')""",
+                                           (now_iso(), fid, key['tenant_id']))
+                        if cur.rowcount != 1:
+                            raise ValueError(f"Flight {seg.get('flight_no') or fid} no longer has enough seats")
+                        fare = float(seg.get('unit_price') or 0)
+                        taxes = float(seg.get('taxes') or 0)
+                        amount = round(fare + taxes, 2)
+                        total_amount += amount
+                        cur = conn.execute("""INSERT INTO pss_bookings
+                            (tenant_id,pnr,trip_pnr,flight_id,passenger_name,passenger_type,contact_email,contact_phone,airport_code,fare_class,
+                             fare_amount,taxes,total_amount,currency,ticket_status,payment_status,booking_status,created_by,created_at,updated_at)
+                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'unissued','pending','confirmed',?,?,?)""",
+                            (key['tenant_id'], alloc_pnr(), trip_pnr, fid, pax_name, pax_type, str(contact.get('email') or ''), str(contact.get('phone') or ''),
+                             str(seg.get('origin') or ''), str(seg.get('cabin') or 'Y'), fare, taxes, amount, str(offer.get('currency') or 'USD'),
+                             None, now_iso(), now_iso()))
+                        booking_id = int(cur.lastrowid)
+                        self._seed_tax_lines(conn, key['tenant_id'], booking_id,
+                                             {'taxes': taxes, 'currency': str(offer.get('currency') or 'USD')})
+                        booking_ids.append(booking_id)
+                cur = conn.execute("""INSERT INTO pss_orders
+                    (tenant_id,offer_id,order_no,status,pnr,passenger_count,amount,currency,contact_json,booking_ids_json,payment_status,created_by,created_at,updated_at)
+                    VALUES (?,?,?,'confirmed',?,?,?,?,?,?,'pending',?,?,?)""",
+                    (key['tenant_id'], offer['id'], order_no, trip_pnr, pax_count, round(total_amount, 2), str(offer.get('currency') or 'USD'),
+                     json.dumps(contact), json.dumps(booking_ids), None, now_iso(), now_iso()))
+                order_id = int(cur.lastrowid)
+                conn.execute("UPDATE pss_offers SET status='ordered',order_id=?,updated_at=? WHERE id=?", (order_id, now_iso(), offer['id']))
+                self._trace(conn, key['tenant_id'], 'api', 'order', order_no, 'order_created', actor=key.get('name') or 'api',
+                            detail=json.dumps({'pnr': trip_pnr, 'passenger_count': pax_count, 'bookings': booking_ids}), handler=self)
+                conn.execute('RELEASE SAVEPOINT api_order_create')
+            except ValueError as exc:
+                conn.execute('ROLLBACK TO SAVEPOINT api_order_create')
+                conn.execute('RELEASE SAVEPOINT api_order_create')
+                return self._json({'error': str(exc)}, 409)
+            except Exception as exc:
+                conn.execute('ROLLBACK TO SAVEPOINT api_order_create')
+                conn.execute('RELEASE SAVEPOINT api_order_create')
+                return self._json({'error': f'Could not create order: {exc}'}, 500)
+            order_row = q(conn, "SELECT * FROM pss_orders WHERE id=?", (order_id,), one=True)
+        payload = {'order_no': order_no, 'pnr': trip_pnr, 'status': 'confirmed', 'amount': round(total_amount, 2), 'booking_ids': booking_ids}
+        _webhook_event(key['tenant_id'], 'order.created', payload, order_no)
+        _webhook_event(key['tenant_id'], 'booking.created', {'pnr': trip_pnr, 'booking_ids': booking_ids}, trip_pnr)
+        return self._json({'order': {'order_no': order_row.get('order_no'), 'pnr': order_row.get('pnr'),
+                                     'status': order_row.get('status'), 'amount': order_row.get('amount'),
+                                     'currency': order_row.get('currency'), 'booking_ids': booking_ids,
+                                     'payment_status': order_row.get('payment_status')}}, 201)
+
+    def api_public_order_get(self, order_no):
+        key = self._public_api_key()
+        if not key:
+            return self._json({'error': 'Invalid API key'}, 401)
+        with db() as conn:
+            row = q(conn, "SELECT * FROM pss_orders WHERE order_no=? AND tenant_id=?", (order_no, key['tenant_id']), one=True)
+            if not row:
+                return self._json({'error': 'Order not found'}, 404)
+            bookings = q(conn, """SELECT id,pnr,trip_pnr,passenger_name,flight_id,ticket_status,booking_status
+                                  FROM pss_bookings WHERE tenant_id=? AND (trip_pnr=? OR pnr=?)""",
+                         (key['tenant_id'], row.get('pnr') or '', row.get('pnr') or ''))
+        return self._json({'order': {'order_no': row.get('order_no'), 'pnr': row.get('pnr'), 'status': row.get('status'),
+                                     'amount': row.get('amount'), 'currency': row.get('currency'), 'payment_status': row.get('payment_status'),
+                                     'created_at': row.get('created_at'), 'bookings': bookings}})
+
+    def api_public_order_cancel(self, order_no):
+        key = self._public_api_key()
+        if not key:
+            return self._json({'error': 'Invalid API key'}, 401)
+        data = read_json(self)
+        with db() as conn:
+            order = q(conn, "SELECT * FROM pss_orders WHERE order_no=? AND tenant_id=?", (order_no, key['tenant_id']), one=True)
+            if not order:
+                return self._json({'error': 'Order not found'}, 404)
+            if order.get('status') == 'cancelled':
+                return self._json({'order': {'order_no': order_no, 'status': 'cancelled'}, 'duplicate': True})
+            bookings = q(conn, """SELECT * FROM pss_bookings WHERE tenant_id=? AND (trip_pnr=? OR pnr=?)
+                                  AND booking_status NOT IN ('cancelled','refunded')""",
+                         (key['tenant_id'], order.get('pnr') or '', order.get('pnr') or ''))
+            for booking in bookings:
+                conn.execute("UPDATE pss_flights SET available_seats=available_seats+1,updated_at=? WHERE id=? AND tenant_id=?",
+                             (now_iso(), booking.get('flight_id'), key['tenant_id']))
+                conn.execute("UPDATE pss_bookings SET booking_status='cancelled',ticket_status='void',updated_at=? WHERE id=?",
+                             (now_iso(), booking['id']))
+            conn.execute("UPDATE pss_orders SET status='cancelled',updated_at=? WHERE id=?", (now_iso(), order['id']))
+            conn.execute("UPDATE pss_offers SET status='cancelled',updated_at=? WHERE id=?", (now_iso(), order.get('offer_id')))
+            self._trace(conn, key['tenant_id'], 'api', 'order', order_no, 'order_cancelled',
+                        actor=key.get('name') or 'api', detail=json.dumps({'reason': data.get('reason') or ''}), handler=self)
+        _webhook_event(key['tenant_id'], 'order.cancelled', {'order_no': order_no, 'reason': data.get('reason') or ''}, order_no)
+        return self._json({'order': {'order_no': order_no, 'status': 'cancelled', 'seats_restored': len(bookings)}})
+
+    def api_developer_api_keys(self, tenant_id, method, identifier=None, user_id=None):
+        with db() as conn:
+            if method == 'GET':
+                rows = q(conn, "SELECT id,name,token_prefix,scopes,status,expires_at,last_used_at,revoked_at,created_at FROM pss_api_keys WHERE tenant_id=? ORDER BY id DESC", (tenant_id,))
+                return self._json({'keys': rows})
+            if method == 'POST':
+                data = read_json(self)
+                name = str(data.get('name') or '').strip()
+                if not name:
+                    return self._json({'error': 'Key name is required'}, 422)
+                token = 'fk_live_' + make_token()
+                scopes = ','.join(_event_list(data.get('scopes') or 'offers:write,orders:write'))
+                expires = data.get('expires_at') or None
+                conn.execute("""INSERT INTO pss_api_keys
+                    (tenant_id,name,token_prefix,token_hash,scopes,status,expires_at,created_by,created_at)
+                    VALUES (?,?,?,?,?,'active',?,?,?)""",
+                    (tenant_id, name, token[:16], _hash_api_key(token), scopes, expires, user_id, now_iso()))
+                log_audit(conn, tenant_id, user_id, 'api_key_created', 'api_key', name, {'scopes': scopes})
+                return self._json({'token': token, 'message': 'Copy this token now; it is not shown again.'}, 201)
+            if method == 'DELETE':
+                conn.execute("UPDATE pss_api_keys SET status='revoked',revoked_at=? WHERE id=? AND tenant_id=?", (now_iso(), identifier, tenant_id))
+                log_audit(conn, tenant_id, user_id, 'api_key_revoked', 'api_key', identifier, {})
+                return self._json({'ok': True})
+
+    def api_developer_webhooks(self, tenant_id, method, identifier=None, user_id=None):
+        with db() as conn:
+            if method == 'GET':
+                rows = q(conn, "SELECT id,name,url,events,status,created_at,updated_at FROM pss_webhooks WHERE tenant_id=? ORDER BY id DESC", (tenant_id,))
+                for row in rows:
+                    row['secret_hint'] = 'whsec_...' if row.get('id') else ''
+                secrets = q(conn, "SELECT id,secret FROM pss_webhooks WHERE tenant_id=?", (tenant_id,))
+                hints = {s['id']: s.get('secret') or '' for s in secrets}
+                for row in rows:
+                    row['secret_hint'] = (hints.get(row['id'])[:12] + '...') if hints.get(row['id']) else ''
+                return self._json({'webhooks': rows, 'events': list(WEBHOOK_EVENTS)})
+            if method == 'POST':
+                data = read_json(self)
+                name = str(data.get('name') or '').strip()
+                url = str(data.get('url') or '').strip()
+                events = ','.join(_event_list(data.get('events') or 'order.created,booking.created'))
+                if not name or not url.startswith(('http://', 'https://')):
+                    return self._json({'error': 'Webhook name and a valid http(s) URL are required'}, 422)
+                secret = 'whsec_' + make_token()
+                conn.execute("""INSERT INTO pss_webhooks
+                    (tenant_id,name,url,secret,events,status,created_by,created_at,updated_at)
+                    VALUES (?,?,?,?,?,'active',?,?,?)""",
+                    (tenant_id, name, url, secret, events, user_id, now_iso(), now_iso()))
+                log_audit(conn, tenant_id, user_id, 'webhook_created', 'webhook', name, {'events': events, 'url': url})
+                return self._json({'id': q(conn, "SELECT id FROM pss_webhooks WHERE tenant_id=? AND name=?", (tenant_id, name), one=True)['id'],
+                                   'secret': secret, 'message': 'Copy this signing secret now.'}, 201)
+            if method == 'PUT':
+                data = read_json(self)
+                url = str(data.get('url') or '').strip()
+                events = ','.join(_event_list(data.get('events') or ''))
+                secret = 'whsec_' + make_token() if data.get('rotate_secret') else None
+                fields, values = [], []
+                for column, value in (('url', url), ('events', events), ('status', data.get('status')), ('secret', secret)):
+                    if value not in (None, ''):
+                        fields.append(f'{column}=?')
+                        values.append(value)
+                if data.get('name'):
+                    fields.append('name=?')
+                    values.append(str(data['name']).strip())
+                if not fields:
+                    return self._json({'error': 'Nothing to update'}, 422)
+                fields.append('updated_at=?')
+                values.extend([now_iso(), identifier, tenant_id])
+                conn.execute(f"UPDATE pss_webhooks SET {','.join(fields)} WHERE id=? AND tenant_id=?", tuple(values))
+                return self._json({'ok': True, **({'secret': secret} if secret else {})})
+            if method == 'DELETE':
+                conn.execute("DELETE FROM pss_webhooks WHERE id=? AND tenant_id=?", (identifier, tenant_id))
+                return self._json({'ok': True})
+
+    def api_developer_webhook_retry(self, tenant_id, delivery_id):
+        with db() as conn:
+            row = q(conn, "SELECT id FROM pss_webhook_deliveries WHERE id=? AND tenant_id=?", (delivery_id, tenant_id), one=True)
+            if not row:
+                return self._json({'error': 'Delivery not found'}, 404)
+            conn.execute("UPDATE pss_webhook_deliveries SET status='pending',next_retry_at=NULL WHERE id=?", (delivery_id,))
+        _deliver_webhooks(tenant_id)
+        return self._json({'ok': True})
+
+    def api_developer_deliveries(self, tenant_id):
+        with db() as conn:
+            rows = q(conn, """SELECT d.id,d.event,d.object_id,d.status,d.attempts,d.response_code,d.response_body,
+                                     d.next_retry_at,d.created_at,d.delivered_at,w.name webhook,w.url
+                              FROM pss_webhook_deliveries d LEFT JOIN pss_webhooks w ON w.id=d.webhook_id
+                              WHERE d.tenant_id=? ORDER BY d.id DESC LIMIT 200""", (tenant_id,))
+        return self._json({'deliveries': rows})
+
+    def api_revenue_dashboard(self, tenant_id, qs):
+        try:
+            end = datetime.strptime((qs.get('to') or [''])[0], '%Y-%m-%d').date() if qs.get('to') else date.today()
+        except Exception:
+            end = date.today()
+        to_date = end.isoformat()
+        try:
+            start = datetime.strptime((qs.get('from') or [''])[0], '%Y-%m-%d').date() if qs.get('from') else end - timedelta(days=29)
+        except Exception:
+            start = end - timedelta(days=29)
+        if start > end:
+            start = end - timedelta(days=29)
+        from_date = start.isoformat()
+        with db() as conn:
+            bookings = q(conn, """SELECT * FROM pss_bookings WHERE tenant_id=?
+                                  AND substr(created_at,1,10) BETWEEN ? AND ?""", (tenant_id, from_date, to_date))
+            payments = q(conn, """SELECT * FROM pss_payments WHERE tenant_id=? AND status IN ('paid','received','captured')
+                                  AND substr(COALESCE(paid_at,created_at),1,10) BETWEEN ? AND ?""", (tenant_id, from_date, to_date))
+            ancillaries = q(conn, """SELECT * FROM pss_ancillary_sales WHERE tenant_id=? AND status='sold'
+                                     AND substr(created_at,1,10) BETWEEN ? AND ?""", (tenant_id, from_date, to_date))
+            refunds = []
+            try:
+                refunds = q(conn, """SELECT * FROM refunds WHERE tenant_id=?
+                                     AND substr(created_at,1,10) BETWEEN ? AND ?""", (tenant_id, from_date, to_date))
+            except Exception:
+                pass
+            flights = q(conn, "SELECT id,flight_no,origin,destination,flight_date FROM pss_flights WHERE tenant_id=?", (tenant_id,))
+            channels = q(conn, "SELECT id,name,code FROM pss_channels WHERE tenant_id=?", (tenant_id,))
+        def _map_int(value):
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+        flight_map = {_map_int(f['id']): f for f in flights if _map_int(f['id']) is not None}
+        channel_map = {_map_int(c['id']): c for c in channels if _map_int(c['id']) is not None}
+        gross = round(sum(float(b.get('total_amount') or 0) for b in bookings), 2)
+        collected = round(sum(float(p.get('amount') or 0) for p in payments), 2)
+        ancillary = round(sum(float(a.get('amount') or 0) for a in ancillaries), 2)
+        refunded = round(sum(float(r.get('amount') or 0) for r in refunds), 2)
+        by_date = {}
+        for b in bookings:
+            day = str(b.get('created_at') or '')[:10]
+            if day:
+                by_date[day] = round(by_date.get(day, 0) + float(b.get('total_amount') or 0), 2)
+        by_channel = {}
+        for b in bookings:
+            name = (channel_map.get(_map_int(b.get('channel_id'))) or {}).get('name') or 'Direct/Unassigned'
+            by_channel[name] = round(by_channel.get(name, 0) + float(b.get('total_amount') or 0), 2)
+        by_route = {}
+        for b in bookings:
+            flight = flight_map.get(_map_int(b.get('flight_id'))) or {}
+            route = f"{flight.get('origin') or '?'} - {flight.get('destination') or '?'}"
+            by_route[route] = round(by_route.get(route, 0) + float(b.get('total_amount') or 0), 2)
+        return self._json({
+            'period': {'from': from_date, 'to': to_date},
+            'kpis': {'gross_revenue': gross, 'cash_collected': collected, 'ancillary_revenue': ancillary,
+                     'refunds': refunded, 'net_revenue': round(gross + ancillary - refunded, 2),
+                     'bookings': len(bookings), 'average_booking_value': round(gross / len(bookings), 2) if bookings else 0},
+            'series': [{'date': d, 'revenue': v} for d, v in sorted(by_date.items())],
+            'channels': [{'name': k, 'revenue': v} for k, v in sorted(by_channel.items(), key=lambda x: -x[1])],
+            'routes': [{'route': k, 'revenue': v} for k, v in sorted(by_route.items(), key=lambda x: -x[1])],
+            'recent_bookings': bookings[-20:][::-1],
+        })
+
+    def api_onboarding_status(self, tenant_id, method, user_id=None):
+        if method == 'POST':
+            data = read_json(self)
+            with db() as conn:
+                row = q(conn, "SELECT data_json FROM onboarding_progress WHERE tenant_id=?", (tenant_id,), one=True)
+                merged = _json_load(row.get('data_json') if row else None, {})
+                merged.update(data.get('data') or data)
+                conn.execute("""INSERT INTO onboarding_progress(tenant_id,step,data_json,completed,updated_at)
+                                VALUES (?,?,?,?,?)
+                                ON CONFLICT(tenant_id) DO UPDATE SET step=excluded.step,data_json=excluded.data_json,
+                                completed=excluded.completed,updated_at=excluded.updated_at""",
+                             (tenant_id, str(data.get('step') or 'profile'), json.dumps(merged),
+                              1 if data.get('completed') else 0, now_iso()))
+        with db() as conn:
+            progress = q(conn, "SELECT step,data_json,completed,updated_at FROM onboarding_progress WHERE tenant_id=?", (tenant_id,), one=True) or {}
+            counts = {
+                'users': q(conn, "SELECT COUNT(*) c FROM users WHERE tenant_id=?", (tenant_id,), one=True)['c'],
+                'branding': q(conn, "SELECT COUNT(*) c FROM tenant_branding WHERE tenant_id=?", (tenant_id,), one=True)['c'],
+                'flights': q(conn, "SELECT COUNT(*) c FROM pss_flights WHERE tenant_id=?", (tenant_id,), one=True)['c'],
+                'channels': q(conn, "SELECT COUNT(*) c FROM pss_channels WHERE tenant_id=?", (tenant_id,), one=True)['c'],
+                'stock': q(conn, "SELECT COUNT(*) c FROM pss_stock_pools WHERE tenant_id=?", (tenant_id,), one=True)['c'],
+                'api_keys': q(conn, "SELECT COUNT(*) c FROM pss_api_keys WHERE tenant_id=? AND status='active'", (tenant_id,), one=True)['c'],
+                'webhooks': q(conn, "SELECT COUNT(*) c FROM pss_webhooks WHERE tenant_id=? AND status='active'", (tenant_id,), one=True)['c'],
+            }
+        checklist = [
+            {'key': 'profile', 'label': 'Airline profile and branding', 'done': int(counts['branding']) > 0, 'path': 'agency-profile'},
+            {'key': 'users', 'label': 'Admin and team users', 'done': int(counts['users']) > 0, 'path': 'setup-users'},
+            {'key': 'schedule', 'label': 'At least one flight', 'done': int(counts['flights']) > 0, 'path': 'pss-flights'},
+            {'key': 'distribution', 'label': 'Sales channel or direct stock', 'done': int(counts['channels']) > 0 or int(counts['stock']) > 0, 'path': 'pss-channels'},
+            {'key': 'api', 'label': 'Partner API key', 'done': int(counts['api_keys']) > 0, 'path': 'developer'},
+            {'key': 'webhooks', 'label': 'Webhook subscription', 'done': int(counts['webhooks']) > 0, 'path': 'developer'},
+        ]
+        return self._json({'progress': progress, 'counts': counts, 'checklist': checklist,
+                           'completed': all(item['done'] for item in checklist)})
+
+    def api_onboarding_create_tenant(self, current_tenant_id, user_id):
+        data = read_json(self)
+        name = str(data.get('airline_name') or '').strip()
+        code = str(data.get('code') or '').strip().upper()
+        if not name or not code or not code.isalnum():
+            return self._json({'error': 'Airline name and an alphanumeric code are required'}, 422)
+        username = str(data.get('admin_username') or 'admin').strip()
+        email = str(data.get('admin_email') or '').strip()
+        alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#'
+        password = str(data.get('admin_password') or ('Aa1!' + ''.join(secrets.choice(alphabet) for _ in range(12))))
+        try:
+            with db() as conn:
+                if q(conn, "SELECT id FROM tenants WHERE code=?", (code,), one=True):
+                    return self._json({'error': 'Tenant code already exists'}, 409)
+                cur = conn.execute("INSERT INTO tenants(name,code,status,settings_json,created_at) VALUES (?,?,'active',?,?)",
+                                   (name, code, json.dumps({'airline_name': name}), now_iso()))
+                tenant_id = int(cur.lastrowid)
+                plan = q(conn, "SELECT id FROM plans ORDER BY id LIMIT 1", one=True)
+                if plan:
+                    conn.execute("INSERT INTO subscriptions(tenant_id,plan_id,status,start_date,billing_cycle,mrr,created_at) VALUES (?,?,'active',?,'monthly',0,?)",
+                                 (tenant_id, plan['id'], _today(), now_iso()))
+                conn.execute("""INSERT INTO users(tenant_id,username,password,full_name,email,role,status,created_at)
+                                VALUES (?,?,?,?,?,'admin','active',?)""",
+                             (tenant_id, username, _hash_password(password), name, email, now_iso()))
+                conn.execute("INSERT INTO onboarding_progress(tenant_id,step,data_json,completed,updated_at) VALUES (?,'profile',?,0,?)",
+                             (tenant_id, json.dumps({'airline_name': name, 'code': code}), now_iso()))
+                seed_pss(conn)
+                log_audit(conn, current_tenant_id, user_id, 'tenant_onboarded', 'tenant', code, {'tenant_id': tenant_id})
+        except Exception as exc:
+            return self._json({'error': f'Could not create tenant: {exc}'}, 500)
+        _webhook_event(current_tenant_id, 'tenant.onboarded', {'tenant_id': tenant_id, 'code': code, 'name': name}, code)
+        return self._json({'tenant': {'id': tenant_id, 'code': code, 'name': name},
+                           'admin': {'username': username, 'password': password},
+                           'message': 'Save these credentials now; the password is not shown again.'}, 201)
+
+    def api_disruption_impact(self, tenant_id, qs):
+        disruption_id = (qs.get('disruption_id') or [''])[0]
+        flight_id = (qs.get('flight_id') or [''])[0]
+        flight_no = (qs.get('flight_no') or [''])[0]
+        with db() as conn:
+            disruption = None
+            if disruption_id:
+                disruption = q(conn, "SELECT * FROM disruptions WHERE id=? AND tenant_id=?", (disruption_id, tenant_id), one=True)
+            where = ["b.tenant_id=?", "b.booking_status NOT IN ('cancelled','refunded')"]
+            args = [tenant_id]
+            if flight_id:
+                where.append("b.flight_id=?")
+                args.append(flight_id)
+            elif flight_no:
+                where.append("f.flight_no=?")
+                args.append(flight_no)
+            elif disruption and disruption.get('affected_pnr'):
+                where.append("b.pnr=?")
+                args.append(disruption['affected_pnr'])
+            else:
+                return self._json({'error': 'Provide flight_id, flight_no, or disruption_id with an affected PNR'}, 422)
+            affected = q(conn, f"""SELECT b.*,f.flight_no,f.origin,f.destination,f.flight_date,f.dep_time,f.arr_time,f.status flight_status
+                                  FROM pss_bookings b LEFT JOIN pss_flights f ON f.id=b.flight_id
+                                  WHERE {' AND '.join(where)} ORDER BY b.id DESC LIMIT 300""", tuple(args))
+            alternates = []
+            if affected:
+                first = affected[0]
+                alternates = q(conn, """SELECT id,flight_no,origin,destination,flight_date,dep_time,arr_time,available_seats,base_fare,currency
+                                        FROM pss_flights WHERE tenant_id=? AND origin=? AND destination=? AND id<>?
+                                        AND available_seats>0 AND status NOT IN ('cancelled','closed')
+                                        ORDER BY flight_date,dep_time LIMIT 30""",
+                               (tenant_id, first.get('origin'), first.get('destination'), first.get('flight_id')))
+            history = q(conn, "SELECT * FROM pss_rebookings WHERE tenant_id=? ORDER BY id DESC LIMIT 50", (tenant_id,))
+        return self._json({'disruption': disruption, 'affected': affected, 'alternatives': alternates, 'history': history})
+
+    def api_disruption_rebook(self, tenant_id, user_id):
+        data = read_json(self)
+        try:
+            booking_id = int(data.get('booking_id') or 0)
+            new_flight_id = int(data.get('new_flight_id') or 0)
+        except Exception:
+            return self._json({'error': 'booking_id and new_flight_id are required'}, 422)
+        if not booking_id or not new_flight_id:
+            return self._json({'error': 'booking_id and new_flight_id are required'}, 422)
+        waiver = 1 if data.get('waiver', True) else 0
+        try:
+            fare_difference = float(data.get('fare_difference') or 0)
+        except Exception:
+            return self._json({'error': 'fare_difference must be a number'}, 422)
+        with db() as conn:
+            booking = q(conn, "SELECT * FROM pss_bookings WHERE id=? AND tenant_id=?", (booking_id, tenant_id), one=True)
+            new_flight = q(conn, "SELECT * FROM pss_flights WHERE id=? AND tenant_id=?", (new_flight_id, tenant_id), one=True)
+            if not booking or not new_flight:
+                return self._json({'error': 'Booking or new flight not found'}, 404)
+            if int(new_flight.get('available_seats') or 0) < 1:
+                return self._json({'error': 'New flight has no available seats'}, 409)
+            old_flight_id = booking.get('flight_id')
+            cur = conn.execute("UPDATE pss_flights SET available_seats=available_seats-1,updated_at=? WHERE id=? AND tenant_id=? AND available_seats>0",
+                               (now_iso(), new_flight_id, tenant_id))
+            if cur.rowcount != 1:
+                return self._json({'error': 'New flight has no available seats'}, 409)
+            if old_flight_id:
+                conn.execute("UPDATE pss_flights SET available_seats=available_seats+1,updated_at=? WHERE id=? AND tenant_id=?",
+                             (now_iso(), old_flight_id, tenant_id))
+            new_total = round(float(booking.get('total_amount') or 0) + (0 if waiver else fare_difference), 2)
+            conn.execute("""UPDATE pss_bookings SET flight_id=?,total_amount=?,booking_status='rebooked',
+                            ticket_status=CASE WHEN ticket_number IS NOT NULL THEN 'reissued' ELSE ticket_status END,updated_at=?
+                            WHERE id=? AND tenant_id=?""", (new_flight_id, new_total, now_iso(), booking_id, tenant_id))
+            cur = conn.execute("""INSERT INTO pss_rebookings
+                (tenant_id,disruption_id,booking_id,old_flight_id,new_flight_id,reason,fare_difference,waiver,status,notify_sent,created_by,created_at,updated_at)
+                VALUES (?,?,?,?,?,?,?,?,'confirmed',0,?,?,?)""",
+                (tenant_id, data.get('disruption_id') or None, booking_id, old_flight_id, new_flight_id,
+                 str(data.get('reason') or 'involuntary schedule change'), fare_difference, waiver, user_id, now_iso(), now_iso()))
+            rebooking_id = int(cur.lastrowid)
+            if data.get('disruption_id'):
+                conn.execute("UPDATE disruptions SET resolution=?,status='resolved',updated_at=? WHERE id=? AND tenant_id=?",
+                             (f"Rebooked PNR {booking.get('pnr')} to {new_flight.get('flight_no')}", now_iso(), data['disruption_id'], tenant_id))
+            channel = 'email' if booking.get('contact_email') else ('sms' if booking.get('contact_phone') else 'log')
+            recipient = booking.get('contact_email') or booking.get('contact_phone') or booking.get('pnr')
+            body = f"Your flight was rebooked to {new_flight.get('flight_no')} on {new_flight.get('flight_date')} at {new_flight.get('dep_time') or 'TBC'}. PNR {booking.get('pnr')}."
+            conn.execute("""INSERT INTO pss_notifications_sent(tenant_id,channel,recipient,subject,body,status,created_at)
+                            VALUES (?,?,?,?,?,'logged',?)""",
+                         (tenant_id, channel, recipient, 'Flight rebooking confirmation', body, now_iso()))
+            conn.execute("UPDATE pss_rebookings SET notify_sent=1 WHERE id=?", (rebooking_id,))
+            self._trace(conn, tenant_id, 'disruption', 'booking', booking.get('pnr'), 'rebooked', actor=user_id,
+                        detail=json.dumps({'old_flight_id': old_flight_id, 'new_flight_id': new_flight_id, 'waiver': bool(waiver)}), handler=self)
+            new_flight_data = {'flight_no': new_flight.get('flight_no'), 'flight_date': new_flight.get('flight_date')}
+        _webhook_event(tenant_id, 'rebooking.confirmed', {'rebooking_id': rebooking_id, 'pnr': booking.get('pnr'),
+                                                          'booking_id': booking_id, 'new_flight': new_flight_data}, booking.get('pnr'))
+        return self._json({'ok': True, 'rebooking_id': rebooking_id, 'pnr': booking.get('pnr'),
+                           'new_flight': new_flight_data, 'notification': {'channel': channel, 'recipient': recipient}})
+
+    def api_loyalty_report(self, tenant_id):
+        with db() as conn:
+            rows = q(conn, """SELECT c.id customer_id, c.loyalty_id, c.name customer, c.type, c.email,
+                                     (SELECT COUNT(*) FROM coupons cp WHERE cp.tenant_id=c.tenant_id
+                                       AND (cp.traveler_name=c.name OR (cp.pnr IS NOT NULL AND cp.pnr IN
+                                       (SELECT pnr FROM orders o WHERE o.tenant_id=c.tenant_id AND o.customer_id=c.id)))) coupons,
+                                     (SELECT COALESCE(SUM(cp.refund_amount),0) FROM coupons cp WHERE cp.tenant_id=c.tenant_id
+                                       AND cp.traveler_name=c.name) refunded,
+                                     (SELECT COALESCE(SUM(o.total_sell),0) FROM orders o
+                                       WHERE o.tenant_id=c.tenant_id AND o.customer_id=c.id) spend
+                              FROM customers c
+                              WHERE c.tenant_id=? AND c.loyalty_id IS NOT NULL AND c.loyalty_id<>''
+                              ORDER BY spend DESC""", (tenant_id,))
+        for r in rows:
+            r['coupon_value'] = r.get('refunded') or 0
+        return self._json({
+            'kpis': {'members': len(rows), 'coupons': sum(int(r.get('coupons') or 0) for r in rows),
+                     'coupon_value': round(sum(float(r.get('refunded') or 0) for r in rows), 2),
+                     'spend': round(sum(float(r.get('spend') or 0) for r in rows), 2)},
+            'rows': rows})
+
+    def api_partner_reports(self, tenant_id):
+        with db() as conn:
+            rows = q(conn, """SELECT a.id agency_id, a.name agency,
+                                      (SELECT COUNT(*) FROM users u WHERE u.tenant_id=a.tenant_id
+                                        AND u.agency_id=a.id AND u.role IN ('agency','agency_admin','agency_agent','station','checkin')) users,
+                                     (SELECT COUNT(*) FROM pss_bookings b WHERE b.tenant_id=a.tenant_id
+                                       AND b.agency_id=a.id) bookings,
+                                      (SELECT COUNT(*) FROM pss_payments p JOIN pss_bookings b ON b.id=p.booking_id AND b.tenant_id=p.tenant_id
+                                        WHERE p.tenant_id=a.tenant_id AND b.tenant_id=a.tenant_id AND b.agency_id=a.id) payments,
+                                      (SELECT COALESCE(SUM(p.amount),0) FROM pss_payments p
+                                        JOIN pss_bookings b ON b.id=p.booking_id AND b.tenant_id=p.tenant_id
+                                        WHERE p.tenant_id=a.tenant_id AND b.tenant_id=a.tenant_id AND b.agency_id=a.id
+                                          AND p.status IN ('paid','received','captured')) collected
+                              FROM pss_agencies a WHERE a.tenant_id=? ORDER BY bookings DESC""", (tenant_id,))
+        return self._json({
+            'kpis': {'agencies': len(rows),
+                     'users': sum(int(r.get('users') or 0) for r in rows),
+                     'bookings': sum(int(r.get('bookings') or 0) for r in rows),
+                     'collected': round(sum(float(r.get('collected') or 0) for r in rows), 2)},
+            'rows': rows})
+
+
+Handler = PartnerAPIHandler
+
+
 def run():
     init_db()
     _ensure_portal_session_cols()
     _rotate_legacy_credentials()
-    host = os.environ.get('HOST', '127.0.0.1')
+    threading.Thread(target=_webhook_worker, daemon=True).start()
+    host = os.environ.get('HOST', '0.0.0.0')
     port = int(os.environ.get('PORT', '8000'))
     httpd = ThreadingHTTPServer((host, port), Handler)
-    print(f"Airline PSS & Travel ERP running on http://{host}:{port}")
+    display_host = '127.0.0.1' if host in ('0.0.0.0', '::', '') else host
+    print(f"Airline PSS & Travel ERP running on http://{display_host}:{port}")
     print(f"Workspace root for .AIR scan: {WORKSPACE_ROOT}")
     if _SECURE_COOKIES_ENV is not None and _SECURE_COOKIES_ENV not in ('0', 'false', 'no'):
         print("Session cookies use the Secure flag (set SECURE_COOKIES=0 for plain-http internal use)")

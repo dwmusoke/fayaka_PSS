@@ -791,6 +791,8 @@ CREATE TABLE IF NOT EXISTS expenses (
   status TEXT DEFAULT 'posted',
   payment_method TEXT,
   reference TEXT,
+  receipt_no TEXT,
+  agency_id INTEGER,
   created_by INTEGER,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -1291,6 +1293,8 @@ CREATE TABLE IF NOT EXISTS pss_flights (
   total_seats INTEGER DEFAULT 0,
   available_seats INTEGER DEFAULT 0,
   base_fare REAL DEFAULT 0,
+  base_fare_reference REAL,
+  fare_optimized_at TEXT,
   currency TEXT DEFAULT 'USD',
   gate TEXT,
   terminal TEXT,
@@ -1319,6 +1323,7 @@ CREATE TABLE IF NOT EXISTS pss_bookings (
   ticket_status TEXT DEFAULT 'unissued',
   payment_status TEXT DEFAULT 'pending',
   booking_status TEXT DEFAULT 'confirmed',
+  hold_expires_at TEXT,
   seat_no TEXT,
   created_by INTEGER,
   created_at TEXT NOT NULL,
@@ -1326,6 +1331,239 @@ CREATE TABLE IF NOT EXISTS pss_bookings (
   UNIQUE(tenant_id, pnr),
   FOREIGN KEY(flight_id) REFERENCES pss_flights(id),
   FOREIGN KEY(channel_id) REFERENCES pss_channels(id)
+);
+CREATE TABLE IF NOT EXISTS pss_inventory_legs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL,
+  flight_id INTEGER NOT NULL,
+  leg_no INTEGER DEFAULT 1,
+  origin TEXT NOT NULL,
+  destination TEXT NOT NULL,
+  flight_date TEXT,
+  dep_time TEXT,
+  arr_time TEXT,
+  aircraft TEXT,
+  status TEXT DEFAULT 'active',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(tenant_id, flight_id, leg_no)
+);
+CREATE TABLE IF NOT EXISTS pss_inventory_segments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL,
+  leg_id INTEGER NOT NULL,
+  segment_no INTEGER DEFAULT 1,
+  origin TEXT NOT NULL,
+  destination TEXT NOT NULL,
+  dep_time TEXT,
+  arr_time TEXT,
+  cabin TEXT DEFAULT 'economy',
+  subclass TEXT DEFAULT 'Y',
+  seats INTEGER DEFAULT 0,
+  status TEXT DEFAULT 'active',
+  supplementary_info TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(tenant_id, leg_id, segment_no)
+);
+CREATE TABLE IF NOT EXISTS pss_inventory_availability (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL,
+  flight_id INTEGER NOT NULL,
+  leg_id INTEGER,
+  segment_id INTEGER,
+  pos TEXT NOT NULL,
+  pos_subclass TEXT DEFAULT 'ALL',
+  available INTEGER DEFAULT 0,
+  capacity INTEGER DEFAULT 0,
+  committed INTEGER DEFAULT 0,
+  published_at TEXT,
+  version INTEGER DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(tenant_id, flight_id, segment_id, pos, pos_subclass)
+);
+CREATE TABLE IF NOT EXISTS pss_inventory_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL,
+  rule_code TEXT NOT NULL,
+  rule_name TEXT NOT NULL,
+  rule_type TEXT DEFAULT 'limit',
+  pos TEXT DEFAULT 'ALL',
+  subclass TEXT DEFAULT 'ALL',
+  value REAL DEFAULT 0,
+  tia_enabled INTEGER DEFAULT 0,
+  tia_percent REAL DEFAULT 0,
+  status TEXT DEFAULT 'active',
+  effective_from TEXT,
+  effective_to TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(tenant_id, rule_code)
+);
+CREATE TABLE IF NOT EXISTS pss_inventory_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL,
+  entity_type TEXT NOT NULL,
+  entity_id TEXT,
+  action TEXT NOT NULL,
+  before_json TEXT,
+  after_json TEXT,
+  actor TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS pss_inventory_queue (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL,
+  issue_type TEXT NOT NULL,
+  severity TEXT DEFAULT 'warning',
+  flight_id INTEGER,
+  message TEXT,
+  status TEXT DEFAULT 'open',
+  created_at TEXT NOT NULL,
+  resolved_at TEXT
+);
+CREATE TABLE IF NOT EXISTS pss_inventory_valuation (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL,
+  flight_id INTEGER NOT NULL,
+  segment_id INTEGER,
+  pos TEXT DEFAULT 'ALL',
+  subclass TEXT DEFAULT 'ALL',
+  valuation REAL DEFAULT 0,
+  active INTEGER DEFAULT 1,
+  updated_at TEXT NOT NULL,
+  UNIQUE(tenant_id, flight_id, segment_id, pos, subclass)
+);
+CREATE TABLE IF NOT EXISTS pss_inventory_market (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL,
+  market TEXT NOT NULL,
+  pos TEXT DEFAULT 'ALL',
+  origin TEXT,
+  destination TEXT,
+  flight_date TEXT,
+  demand INTEGER DEFAULT 0,
+  bookings INTEGER DEFAULT 0,
+  revenue REAL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  UNIQUE(tenant_id, market, pos, flight_date)
+);
+CREATE TABLE IF NOT EXISTS pss_api_keys (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  token_prefix TEXT NOT NULL,
+  token_hash TEXT NOT NULL,
+  scopes TEXT DEFAULT 'offers:write,orders:write',
+  status TEXT DEFAULT 'active',
+  expires_at TEXT,
+  last_used_at TEXT,
+  created_by INTEGER,
+  revoked_at TEXT,
+  created_at TEXT NOT NULL,
+  UNIQUE(tenant_id, name)
+);
+CREATE TABLE IF NOT EXISTS pss_webhooks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  url TEXT NOT NULL,
+  secret TEXT NOT NULL,
+  events TEXT NOT NULL,
+  status TEXT DEFAULT 'active',
+  created_by INTEGER,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(tenant_id, name)
+);
+CREATE TABLE IF NOT EXISTS pss_webhook_deliveries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL,
+  webhook_id INTEGER NOT NULL,
+  event TEXT NOT NULL,
+  object_id TEXT,
+  payload TEXT NOT NULL,
+  status TEXT DEFAULT 'pending',
+  attempts INTEGER DEFAULT 0,
+  response_code INTEGER,
+  response_body TEXT,
+  next_retry_at TEXT,
+  created_at TEXT NOT NULL,
+  delivered_at TEXT
+);
+CREATE TABLE IF NOT EXISTS pss_offers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL,
+  offer_no TEXT NOT NULL,
+  token TEXT NOT NULL,
+  api_key_id INTEGER,
+  channel TEXT DEFAULT 'api',
+  pos TEXT DEFAULT 'DIRECT',
+  currency TEXT DEFAULT 'USD',
+  passenger_count INTEGER DEFAULT 1,
+  segments_json TEXT NOT NULL,
+  pricing_json TEXT NOT NULL,
+  total_amount REAL DEFAULT 0,
+  status TEXT DEFAULT 'active',
+  expires_at TEXT,
+  order_id INTEGER,
+  created_by INTEGER,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(tenant_id, offer_no),
+  UNIQUE(token)
+);
+CREATE TABLE IF NOT EXISTS pss_orders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL,
+  order_no TEXT NOT NULL,
+  offer_id INTEGER,
+  status TEXT DEFAULT 'confirmed',
+  pnr TEXT,
+  passenger_count INTEGER DEFAULT 1,
+  amount REAL DEFAULT 0,
+  currency TEXT DEFAULT 'USD',
+  contact_json TEXT DEFAULT '{}',
+  booking_ids_json TEXT DEFAULT '[]',
+  payment_status TEXT DEFAULT 'pending',
+  created_by INTEGER,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(tenant_id, order_no)
+);
+CREATE TABLE IF NOT EXISTS pss_rebookings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL,
+  disruption_id INTEGER,
+  booking_id INTEGER NOT NULL,
+  old_flight_id INTEGER,
+  new_flight_id INTEGER NOT NULL,
+  reason TEXT,
+  fare_difference REAL DEFAULT 0,
+  waiver INTEGER DEFAULT 1,
+  status TEXT DEFAULT 'confirmed',
+  notify_sent INTEGER DEFAULT 0,
+  created_by INTEGER,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS pss_notifications_sent (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL,
+  channel TEXT NOT NULL,
+  recipient TEXT,
+  subject TEXT,
+  body TEXT NOT NULL,
+  status TEXT DEFAULT 'logged',
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS onboarding_progress (
+  tenant_id INTEGER PRIMARY KEY,
+  step TEXT DEFAULT 'profile',
+  data_json TEXT DEFAULT '{}',
+  completed INTEGER DEFAULT 0,
+  updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS pss_checkins (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1344,10 +1582,46 @@ CREATE TABLE IF NOT EXISTS pss_checkins (
   status TEXT DEFAULT 'checked_in',
   checked_in_at TEXT,
   gate_closed_at TEXT,
+  boarding_status TEXT DEFAULT 'not_boarded',
+  boarded_at TEXT,
+  arrival_status TEXT,
+  carousel TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(tenant_id, checkin_no),
   FOREIGN KEY(booking_id) REFERENCES pss_bookings(id)
+);
+CREATE TABLE IF NOT EXISTS pss_baggage_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL,
+  checkin_id INTEGER NOT NULL,
+  booking_id INTEGER,
+  pnr TEXT,
+  bag_tag TEXT NOT NULL,
+  sequence_no INTEGER DEFAULT 0,
+  weight_kg REAL DEFAULT 0,
+  status TEXT DEFAULT 'tagged',
+  location TEXT,
+  sale_no TEXT,
+  flight_no TEXT,
+  destination TEXT,
+  carousel TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(tenant_id, bag_tag),
+  FOREIGN KEY(checkin_id) REFERENCES pss_checkins(id)
+);
+CREATE TABLE IF NOT EXISTS pss_baggage_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL,
+  baggage_id INTEGER NOT NULL,
+  checkin_id INTEGER,
+  event_type TEXT NOT NULL,
+  location TEXT,
+  actor TEXT,
+  note TEXT,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(baggage_id) REFERENCES pss_baggage_items(id)
 );
 CREATE TABLE IF NOT EXISTS pss_payments (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1365,6 +1639,7 @@ CREATE TABLE IF NOT EXISTS pss_payments (
   paid_at TEXT,
   captured_at TEXT,
   notes TEXT,
+  raw_json TEXT,
   created_by INTEGER,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -1748,16 +2023,23 @@ def ensure_erp_pss_link(conn):
     _add_columns(conn, 'estimates', [('agency_id', 'INTEGER')])
     _add_columns(conn, 'credit_notes', [('agency_id', 'INTEGER')])
     _add_columns(conn, 'bills', [('agency_id', 'INTEGER')])
-    _add_columns(conn, 'expenses', [('agency_id', 'INTEGER')])
+    _add_columns(conn, 'expenses', [('agency_id', 'INTEGER'), ('receipt_no', 'TEXT')])
     _add_columns(conn, 'pss_bookings', [
         ('customer_id', 'INTEGER'),
         ('order_id', 'INTEGER'),
         ('invoice_id', 'INTEGER'),
     ])
+    _add_columns(conn, 'pss_checkins', [
+        ('boarding_status', "TEXT DEFAULT 'not_boarded'"),
+        ('boarded_at', 'TEXT'),
+        ('arrival_status', 'TEXT'),
+        ('carousel', 'TEXT'),
+    ])
     _add_columns(conn, 'pss_payments', [
         ('customer_id', 'INTEGER'),
         ('erp_payment_id', 'INTEGER'),
         ('invoice_id', 'INTEGER'),
+        ('raw_json', 'TEXT'),
     ])
     try:
         conn.executescript("""
@@ -1767,6 +2049,9 @@ def ensure_erp_pss_link(conn):
         CREATE INDEX IF NOT EXISTS idx_payments_pss ON payments(tenant_id, pss_payment_id);
         CREATE INDEX IF NOT EXISTS idx_journals_pss ON journals(tenant_id, pss_booking_id);
         CREATE INDEX IF NOT EXISTS idx_pss_bookings_links ON pss_bookings(tenant_id, customer_id, order_id, invoice_id);
+        CREATE INDEX IF NOT EXISTS idx_pss_baggage_checkin ON pss_baggage_items(tenant_id, checkin_id);
+        CREATE INDEX IF NOT EXISTS idx_pss_baggage_tag ON pss_baggage_items(tenant_id, bag_tag);
+        CREATE INDEX IF NOT EXISTS idx_pss_baggage_events ON pss_baggage_events(tenant_id, baggage_id, created_at);
         """)
     except Exception:
         pass
@@ -2257,8 +2542,9 @@ def ensure_pss(conn):
                           ('doc_no', 'TEXT'), ('trip_pnr', 'TEXT'), ('portal_customer_id', 'INTEGER'),
                           ('fare_basis', "TEXT DEFAULT 'Y'"), ('commission', 'REAL DEFAULT 0'),
                           ('service_fee', 'REAL DEFAULT 0'), ('issue_date', 'TEXT'), ('issued_by', 'TEXT'),
-                          ('baggage_allowance_kg', 'REAL DEFAULT 23')]),
+                           ('baggage_allowance_kg', 'REAL DEFAULT 23'), ('hold_expires_at', 'TEXT')]),
         ('pss_payments', [('trace_id', 'TEXT'), ('booking_source', "TEXT DEFAULT 'counter'")]),
+        ('pss_flights', [('base_fare_reference', 'REAL'), ('fare_optimized_at', 'TEXT')]),
     ]:
         existing = {r['name'] for r in q(conn, f"PRAGMA table_info({table})")}
         for col, ddl in cols:
@@ -2299,6 +2585,16 @@ def seed_pss(conn):
                 (tenant_id,code,name,channel_type,commission_rate,allowed_airports,currency,settlement_days,status,created_at,updated_at)
                 VALUES (?,?,?,?,?,?,?,?,'active',?,?)""",
                 (tid, code, name, ctype, rate, allowed, cur, settle, ts, ts))
+        inventory_rules = [
+            ('HOLD_EXPIRY', 'Seat hold expiry (minutes)', 'hold_expiry', 'ALL', 'ALL', 20, 0, 0),
+            ('POS_GDS_GATE', 'GDS availability gate', 'gate', 'GDS', 'ALL', 85, 0, 0),
+            ('TIA_EARLY', 'Temporary inventory adjustment', 'limit', 'ALL', 'ALL', 0, 1, 5)
+        ]
+        for code, name, rtype, pos, subclass, value, tia_enabled, tia_percent in inventory_rules:
+            conn.execute("""INSERT OR IGNORE INTO pss_inventory_rules
+                (tenant_id,rule_code,rule_name,rule_type,pos,subclass,value,tia_enabled,tia_percent,status,created_at,updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,'active',?,?)""",
+                (tid, code, name, rtype, pos, subclass, value, tia_enabled, tia_percent, ts, ts))
         pools = [
             (f'POOL-{tid}-001', 'UG', 'UG', 20000000, 20009999, 20000000, 'airport', 'KLA'),
             (f'POOL-{tid}-002', 'UG', 'UG', 30000000, 30009999, 30000000, 'channel', 'OTA'),

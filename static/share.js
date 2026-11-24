@@ -1,5 +1,6 @@
 const root = document.getElementById('share-root');
 const token = location.pathname.split('/').filter(Boolean).pop();
+const bagIndex = Number(new URLSearchParams(location.search).get('bag') || 0) || 0;
 const esc = (s) => String(s??'').replace(/[&<>"']/g, m=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[m]));
 const money = (n, c='USD') => (n===null||n===undefined) ? '-' : `${c} ${Number(n).toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2})}`;
 
@@ -42,14 +43,14 @@ function summary(data){
     fact('Total', money(c.estimate.total, c.estimate.currency)),
     fact('Status', c.estimate.status)
   ].join('');
-  if(c.pss_booking) return [
-    fact('PNR', c.pss_booking.pnr),
-    fact('Passenger', c.pss_booking.passenger_name),
-    fact('Flight', c.pss_booking.flight_no),
-    fact('Route', `${c.pss_booking.origin||'-'} ? ${c.pss_booking.destination||'-'}`),
-    fact('Ticket', c.pss_booking.ticket_number||'Not issued'),
-    fact('Payment', c.pss_booking.payment_status),
-    fact('Total', money(c.pss_booking.total_amount, c.pss_booking.currency))
+  if(c.uplift_sale) return [
+    fact('Coupon', c.uplift_sale.sale_no),
+    fact('Passenger', c.checkin?.passenger_name || c.pss_booking?.passenger_name),
+    fact('PNR', c.pss_booking?.pnr || c.checkin?.pnr),
+    fact('Bag tag', (c.baggage||[])[bagIndex]?.bag_tag || (c.baggage||[])[0]?.bag_tag),
+    fact('Description', c.uplift_sale.description),
+    fact('Status', c.uplift_sale.payment_status),
+    fact('Amount', money(c.uplift_sale.amount, c.uplift_sale.currency))
   ].join('');
   if(c.checkin) return [
     fact('Check-in', c.checkin.checkin_no),
@@ -59,6 +60,15 @@ function summary(data){
     fact('Bags', c.checkin.bag_count),
     fact('Method', c.checkin.checkin_method),
     fact('Status', c.checkin.status)
+  ].join('');
+  if(c.pss_booking) return [
+    fact('PNR', c.pss_booking.pnr),
+    fact('Passenger', c.pss_booking.passenger_name),
+    fact('Flight', c.pss_booking.flight_no),
+    fact('Route', `${c.pss_booking.origin||'-'} → ${c.pss_booking.destination||'-'}`),
+    fact('Ticket', c.pss_booking.ticket_number||'Not issued'),
+    fact('Payment', c.pss_booking.payment_status),
+    fact('Total', money(c.pss_booking.total_amount, c.pss_booking.currency))
   ].join('');
   if(c.credit_note) return [
     fact('Credit note', c.credit_note.credit_note_no),
@@ -111,10 +121,11 @@ function timeline(activity){
 
 function render(data){
   const b = data.branding || {};
-  const titleMap = {booking:'Booking confirmation', invoice:'Invoice', customer:'Customer statement', traveler:'Traveler statement', payment:'Payment receipt', receipt:'Payment receipt', bill:'Supplier bill', order:'Booking confirmation', estimate:'Estimate', credit_note:'Credit note', eticket:'Electronic ticket', boardingpass:'Boarding pass', journeypass:'Travel Itinerary'};
+  const titleMap = {booking:'Booking confirmation', pss_booking:'Booking confirmation', invoice:'Invoice', customer:'Customer statement', traveler:'Traveler statement', payment:'Payment receipt', receipt:'Payment receipt', bill:'Supplier bill', order:'Booking confirmation', estimate:'Estimate', credit_note:'Credit note', eticket:'Electronic ticket', boardingpass:'Boarding pass', journeypass:'Travel Itinerary', pss_checkin:'Boarding pass', baggage_tag:'Baggage tag', baggagetag:'Baggage tag', upliftcoupon:'Uplift coupon'};
   const title = titleMap[data.entity_type] || 'Client document';
-  const pdfKind = data.entity_type === 'order' ? 'booking' : data.entity_type;
-  root.innerHTML = `<div class="share-top"><div><h2 style="margin:0">${esc(title)}</h2><div class="muted small">Secure client view · prepared by ${esc(b.company_name||'Travel ERP')}</div></div><div><span class="live-pill"><span class="live-dot"></span>Live · ${data.share?.views||0} views</span> <a class="btn" style="background:${esc(b.accent_color||'#2563eb')};color:#fff;padding:9px 13px;border-radius:9px;text-decoration:none;font-weight:600;display:inline-block" href="/api/documents/pdf/${esc(pdfKind)}/${data.entity_id}?token=${encodeURIComponent(token)}" target="_blank">Open PDF</a></div></div>
+  const pdfKind = data.entity_type === 'order' ? 'booking' : (data.entity_type === 'pss_booking' ? 'itinerary' : (data.entity_type === 'pss_checkin' ? 'boardingpass' : (data.entity_type === 'upliftcoupon' ? 'upliftcoupon' : (data.entity_type === 'payment' ? 'receipt' : (data.entity_type === 'baggage_tag' ? 'baggagetag' : data.entity_type)))));
+  const bagParam = (pdfKind === 'baggagetag' || pdfKind === 'upliftcoupon') ? `&bag=${encodeURIComponent(bagIndex)}` : '';
+  root.innerHTML = `<div class="share-top"><div><h2 style="margin:0">${esc(title)}</h2><div class="muted small">Secure client view · prepared by ${esc(b.company_name||'Travel ERP')}</div></div><div><span class="live-pill"><span class="live-dot"></span>Live · ${data.share?.views||0} views</span> <a class="btn" style="background:${esc(b.accent_color||'#2563eb')};color:#fff;padding:9px 13px;border-radius:9px;text-decoration:none;font-weight:600;display:inline-block" href="/api/documents/pdf/${esc(pdfKind)}/${data.entity_id}?token=${encodeURIComponent(token)}${bagParam}" target="_blank">Open PDF</a></div></div>
   <div class="share-hero" style="background:linear-gradient(135deg,${esc(b.primary_color||'#0f2742')},${esc(b.accent_color||'#2563eb')})">${brandMark(b)}<h1 style="margin:8px 0;color:#fff;font-size:24px">${esc(b.company_name||'Travel ERP')}</h1><div style="opacity:.85;font-size:12px">${esc(b.address||'')} ${esc(b.phone||'')} ${esc(b.email||'')}</div></div>
   <div class="share-body"><div class="share-grid">${summary(data)}</div><hr><div class="workspace-grid grid two"><div><h3>Live activity</h3><div class="activity-list">${timeline(data.activity)}</div></div><div><h3>Document note</h3><p class="muted small">${esc(b.footer_note||'This document is shared for client review. Values update as the booking, invoice or payment status changes.')}</p><p class="tiny muted">Recipient: ${esc(data.share?.recipient||'Client')} · Permission: ${esc(data.share?.permission||'view')} · Created ${esc(data.share?.created_at||'')}</p></div></div></div>`;
 }

@@ -80,10 +80,15 @@ def recompute_invoice(conn, invoice_id):
     inv = q(conn, "SELECT * FROM invoices WHERE id=?", (invoice_id,), one=True)
     if not inv:
         return
-    paid = q(conn, "SELECT COALESCE(SUM(amount),0) s FROM allocations WHERE invoice_id=?", (invoice_id,), one=True)['s'] or 0
+    paid = q(conn, """SELECT COALESCE(SUM(a.amount),0) s FROM allocations a
+                      LEFT JOIN payments p ON p.id=a.payment_id
+                      WHERE a.invoice_id=? AND (p.id IS NULL OR LOWER(COALESCE(p.status,'')) IN
+                      ('received','captured','paid','successful','cleared'))""", (invoice_id,), one=True)['s'] or 0
     balance = max((inv.get('total') or 0) - paid, 0)
     status = inv.get('status') or 'issued'
-    if balance <= 0.01 and (inv.get('total') or 0) > 0:
+    if status in ('void', 'cancelled', 'draft', 'refunded'):
+        pass
+    elif balance <= 0.01 and (inv.get('total') or 0) > 0:
         status = 'paid'
     elif paid > 0:
         status = 'partially_paid'

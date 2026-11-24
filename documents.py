@@ -1,11 +1,13 @@
 import base64
 import io
 import json
+from datetime import datetime
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.utils import ImageReader
 from reportlab.graphics.barcode import qr
+from reportlab.graphics.barcode import code128
 from reportlab.graphics.shapes import Drawing
 from reportlab.graphics import renderPDF
 from reportlab.pdfgen import canvas
@@ -60,6 +62,39 @@ def _iata_name(name, title=None):
     return value + (('/' + title.upper()) if title else '')
 
 
+def _bag_tag_no(bag):
+    bag = bag or {}
+    if not isinstance(bag, dict):
+        return str(bag)
+    for key in ('tag_no', 'bag_tag_no', 'bag_tag', 'tag', 'tag_number', 'bag_number', 'serial_no', 'id'):
+        if bag.get(key):
+            return str(bag[key])
+    return ''
+
+
+def _selected_bag(context):
+    bags = context.get('baggage') or []
+    idx = 0
+    try:
+        idx = int(context.get('bag_index') or 0)
+    except Exception:
+        idx = 0
+    if bags:
+        try:
+            if 0 <= idx < len(bags):
+                return bags[idx]
+        except Exception:
+            pass
+        return bags[0]
+    ci = context.get('checkin') or context.get('pss_checkin') or {}
+    tags = ci.get('bag_tags') or ''
+    if isinstance(tags, (list, tuple)):
+        tags = tags[0] if tags else ''
+    else:
+        tags = str(tags).replace(';', ',').split(',')[0].strip()
+    return {'tag_no': tags}
+
+
 def _fit(text, font, size, max_w, c):
     text = str(text or '')
     if max_w <= 0:
@@ -90,6 +125,96 @@ def _qr(c, payload, x, y, size=70):
     renderPDF.draw(drawing, c, x, y)
 
 
+def _barcode128(c, value, x, y, width=300, height=34):
+    text = str(value if value not in (None, '') else '')
+    try:
+        widget = code128.Code128(text or ' ', barHeight=height, barWidth=0.32, humanReadable=False)
+        bounds = widget.getBounds()
+        bw, bh = bounds[2] - bounds[0], bounds[3] - bounds[1]
+        scale_x, scale_y = width / bw, height / bh
+        drawing = Drawing(width, height, transform=[scale_x, 0, 0, scale_y,
+                                                     -bounds[0] * scale_x, -bounds[1] * scale_y])
+        drawing.add(widget)
+        renderPDF.draw(drawing, c, x, y)
+        return
+    except Exception:
+        pass
+    try:
+        c.setFillColor(colors.black)
+    except Exception:
+        pass
+    try:
+        c.setFont('Helvetica', 8)
+    except Exception:
+        pass
+    try:
+        c.drawString(x, y, _fit(text, 'Helvetica', 8, max(1, width)) or text[:200])
+    except Exception:
+        pass
+
+
+def _bcbp(ci, bk):
+    ci = ci or {}
+    bk = bk or {}
+
+    def fld(value, length, pad=' ', right=False):
+        text = str(value if value not in (None, '') else '').strip()[:(length)]
+        return text.rjust(length, pad) if right else text.ljust(length, pad)
+
+    name = str(_iata_name(ci.get('passenger_name') or bk.get('passenger_name')) or '').strip()
+    if not name:
+        name = 'PAX/'
+    flight = str(ci.get('flight_no') or bk.get('flight_no') or '').strip()
+    letters = ''.join(ch for ch in flight if ch.isalpha()).upper()
+    digits = ''.join(ch for ch in flight if ch.isdigit())
+    carrier = fld(letters[:3] or (bk.get('carrier') or bk.get('operating_carrier') or ''), 3)
+    number = fld(digits[:5], 5)
+    raw_date = str(ci.get('flight_date') or bk.get('flight_date') or '').strip()
+    doy = '001'
+    if raw_date:
+        parsed = None
+        for fmt in ('%Y-%m-%d', '%Y/%m/%d', '%d-%m-%Y', '%d/%m/%Y', '%m/%d/%Y', '%Y%m%d'):
+            try:
+                parsed = datetime.strptime(raw_date[:10], fmt)
+                break
+            except Exception:
+                continue
+        if parsed is None:
+            try:
+                parsed = datetime.fromisoformat(raw_date[:10])
+            except Exception:
+                pass
+        if parsed is not None:
+            doy = fld(parsed.timetuple().tm_yday, 3, '0', True)
+    compartment = str(ci.get('cabin_class') or bk.get('fare_class') or bk.get('cabin_class') or 'Y').strip()[:1].upper() or 'Y'
+    try:
+        seq = int(ci.get('id') or ci.get('checkin_id') or 0)
+    except Exception:
+        seq = 0
+    seq = max(0, seq)
+    try:
+        bags = int(ci.get('bag_count') or bk.get('bag_count') or 0)
+    except Exception:
+        bags = 0
+    bags = max(0, bags)
+    return ''.join([
+        'M1',
+        fld(name, 20),
+        'E',
+        fld(ci.get('pnr') or bk.get('pnr'), 7),
+        fld(ci.get('origin') or bk.get('origin'), 3),
+        fld(ci.get('destination') or bk.get('destination'), 3),
+        carrier,
+        number,
+        doy,
+        compartment,
+        fld(ci.get('seat_no') or bk.get('seat_no'), 4),
+        fld(seq, 5, '0', True),
+        fld('1', 1),
+        fld(0, 2, '0', True),
+    ])
+
+
 def _verify_payload(kind, context, branding):
     refs = {
         'invoice': (context.get('invoice') or {}).get('invoice_no'),
@@ -102,6 +227,8 @@ def _verify_payload(kind, context, branding):
         'eticket': (context.get('pss_booking') or {}).get('ticket_number'),
         'boardingpass': (context.get('checkin') or context.get('pss_checkin') or {}).get('checkin_no'),
         'journeypass': (context.get('pss_booking') or {}).get('pnr'),
+        'baggagetag': _bag_tag_no(_selected_bag(context)),
+        'upliftcoupon': (context.get('uplift_sale') or {}).get('sale_no') or (context.get('checkin') or {}).get('checkin_no'),
     }
     ref = str(refs.get(kind) or '')
     extra = ''
@@ -109,8 +236,16 @@ def _verify_payload(kind, context, branding):
         b = context.get('pss_booking') or {}
         extra = f"PNR {b.get('pnr') or ''} | {b.get('passenger_name') or ''} | {b.get('flight_no') or ''}"
     elif kind == 'boardingpass':
-        b = context.get('pss_booking') or {}
-        extra = f"PNR {b.get('pnr') or ''} | SEAT {(context.get('checkin') or {}).get('seat_no') or ''}"
+        b = context.get('pss_booking') or context.get('booking') or {}
+        ci = context.get('checkin') or context.get('pss_checkin') or {}
+        extra = f"PNR {b.get('pnr') or ''} | SEAT {ci.get('seat_no') or ''}"
+    elif kind == 'baggagetag':
+        b = context.get('pss_booking') or context.get('booking') or {}
+        extra = f"PNR {b.get('pnr') or ''} | {_iata_name(b.get('passenger_name'))}"
+    elif kind == 'upliftcoupon':
+        b = context.get('pss_booking') or context.get('booking') or {}
+        sale = context.get('uplift_sale') or {}
+        extra = f"PNR {b.get('pnr') or ''} | {_bag_tag_no(_selected_bag(context))} | AMT {sale.get('amount') or 0}"
     elif kind == 'receipt':
         p = context.get('payment') or {}
         extra = f"AMT {p.get('amount') or ''} {p.get('currency') or ''}"
@@ -218,7 +353,7 @@ def _header(c, branding, title, subtitle, continuation=False):
         c.drawString(42, height - 19, str(branding.get('company_name') or 'Fayaka Airline'))
         c.setFillColor(colors.HexColor('#d7e3f0'))
         c.setFont('Helvetica', 8.5)
-        label = f"{doc_title}  ?  {doc_sub}" if doc_sub else doc_title
+        label = f"{doc_title}  ·  {doc_sub}" if doc_sub else doc_title
         c.drawRightString(width - 42, height - 19, _fit(label, 'Helvetica', 8.5, 260, c))
         return height - 48
 
@@ -256,11 +391,11 @@ def _header(c, branding, title, subtitle, continuation=False):
         info_y -= 11
     parts = [p for p in [branding.get('address') or branding.get('location'), branding.get('phone'), branding.get('email'), branding.get('website')] if p]
     if parts:
-        c.drawString(x, info_y, _fit(' ? '.join(str(p) for p in parts), 'Helvetica', 8, info_max, c))
+        c.drawString(x, info_y, _fit(' · '.join(str(p) for p in parts), 'Helvetica', 8, info_max, c))
         info_y -= 11
     tax_bits = [b for b in [branding.get('tax_id') and f"Tax/Reg: {branding['tax_id']}", branding.get('location') if branding.get('address') else None] if b]
     if tax_bits:
-        c.drawString(x, info_y, _fit(' ? '.join(str(b) for b in tax_bits), 'Helvetica', 8, info_max, c))
+        c.drawString(x, info_y, _fit(' · '.join(str(b) for b in tax_bits), 'Helvetica', 8, info_max, c))
     return height - band_h - 22
 
 def _new_page(c, branding, title, subtitle):
@@ -381,19 +516,63 @@ def _totals_box(c, y, lines, branding, title, subtitle):
     return top - needed - 14
 
 
-def _boarding_card(c, y, branding, ci, bk, payload):
+def _boarding_card(c, y, branding, ci, bk, payload, bags=None, bcbp=None):
     width, _ = A4
     primary, accent, tint, ink, muted = _brand(branding)
+    ci = ci or {}
+    bk = bk or {}
     x, w = 42, width - 84
     h = 372
     top = y
     if top - h < 56:
         c.showPage()
         top = A4[1] - 60
+    bottom = top - h
+    code = str(bcbp or _bcbp(ci, bk))
+    tags = []
+    for bag in (bags or []):
+        if isinstance(bag, dict):
+            tag = (bag.get('tag_no') or bag.get('bag_tag_no') or bag.get('bag_tag')
+                   or bag.get('tag') or bag.get('bag_number') or bag.get('tag_number')
+                   or bag.get('id'))
+        else:
+            tag = bag
+        if tag:
+            tags.append(str(tag))
+    if not tags:
+        raw = ci.get('bag_tags') or bk.get('bag_tags') or ''
+        if isinstance(raw, (list, tuple)):
+            tags = [str(t) for t in raw if t]
+        elif raw:
+            tags = [p.strip() for p in str(raw).replace(';', ',').split(',') if p.strip()]
+    try:
+        seq = int(ci.get('id') or ci.get('checkin_id') or 0)
+    except Exception:
+        seq = 0
+    seq = max(0, seq)
+    try:
+        bag_count = int(ci.get('bag_count') or bk.get('bag_count') or 0)
+    except Exception:
+        bag_count = 0
+    bag_count = max(0, bag_count)
+    fields = [
+        ('PASSENGER', _iata_name(ci.get('passenger_name') or bk.get('passenger_name'))),
+        ('PNR', bk.get('pnr') or ci.get('pnr')),
+        ('FLIGHT', ci.get('flight_no') or bk.get('flight_no')),
+        ('DATE', ci.get('flight_date') or bk.get('flight_date')),
+        ('SEAT', ci.get('seat_no') or bk.get('seat_no')),
+        ('GATE', ci.get('gate') or bk.get('gate')),
+        ('TERMINAL', ci.get('terminal') or bk.get('terminal')),
+        ('BOARDING', ci.get('dep_time') or bk.get('dep_time')),
+        ('CLASS', bk.get('fare_class') or bk.get('cabin_class') or ci.get('cabin_class') or 'Y'),
+        ('SEQ', f"{seq:05d}"[-5:]),
+        ('BAGS', bag_count or len(tags) or 0),
+        ('TICKET', bk.get('ticket_number')),
+    ]
     c.setFillColor(colors.white)
     c.setStrokeColor(accent)
     c.setLineWidth(1.2)
-    c.roundRect(x, top - h, w, h, 10, stroke=1, fill=1)
+    c.roundRect(x, bottom, w, h, 10, stroke=1, fill=1)
     c.setFillColor(primary)
     c.roundRect(x, top - 48, w, 48, 10, stroke=0, fill=1)
     c.rect(x, top - 54, w, 8, stroke=0, fill=1)
@@ -414,53 +593,216 @@ def _boarding_card(c, y, branding, ci, bk, payload):
     c.setFillColor(muted)
     c.setFont('Helvetica', 9)
     c.drawString(x + 18, top - 106, f"{ci.get('flight_date') or bk.get('flight_date') or ''}   {ci.get('dep_time') or bk.get('dep_time') or ''}")
-    fields = [
-        ('PASSENGER', _iata_name(ci.get('passenger_name') or bk.get('passenger_name'))),
-        ('SEAT', ci.get('seat_no') or bk.get('seat_no')),
-        ('GATE', ci.get('gate') or bk.get('gate')),
-        ('TERMINAL', ci.get('terminal') or bk.get('terminal')),
-        ('BOARDING', ci.get('dep_time') or bk.get('dep_time')),
-        ('BAGS', ci.get('bag_count')),
-        ('CLASS', bk.get('fare_class')),
-        ('CHECK-IN', ci.get('checked_in_at')),
-    ]
     col_w = (w - 150) / 2
     for idx, (label, value) in enumerate(fields):
         col, row = idx % 2, idx // 2
         fx = x + 18 + col * col_w
-        fy = top - 142 - row * 38
+        fy = top - 140 - row * 26
         c.setFillColor(muted)
         c.setFont('Helvetica-Bold', 7.5)
         c.drawString(fx, fy, str(label))
         c.setFillColor(ink)
-        c.setFont('Helvetica-Bold', 11)
-        c.drawString(fx, fy - 14, str(value if value not in (None, '') else '-')[:26])
+        c.setFont('Helvetica-Bold', 10.5)
+        c.drawString(fx, fy - 12, _fit(str(value if value not in (None, '') else '-'), 'Helvetica-Bold', 10.5, col_w - 12, c))
     c.setStrokeColor(accent)
     c.setDash(4, 3)
-    c.line(x + 12, top - 282, x + w - 12, top - 282)
+    c.line(x + 12, top - 292, x + w - 12, top - 292)
     c.setDash()
-    qr_x = x + w - 116
-    _qr(c, payload, qr_x, top - h + 20, 92)
-    c.setFillColor(primary)
-    c.setFont('Helvetica-Bold', 9)
-    c.drawString(x + 18, top - h + 72, 'PNR')
-    c.drawString(x + 18, top - h + 52, 'TICKET')
-    c.drawString(x + 18, top - h + 32, 'CHECK-IN')
+    qr_size = 74
+    qr_x = x + w - qr_size - 14
+    _qr(c, code, qr_x, bottom + 8, qr_size)
+    code_w = w - qr_size - 46
+    c.setFillColor(muted)
+    c.setFont('Helvetica-Bold', 7.5)
+    c.drawString(x + 18, bottom + 70, 'BCBP / SECURITY CODE')
     c.setFillColor(ink)
-    c.setFont('Helvetica-Bold', 11)
-    c.drawString(x + 72, top - h + 72, str(bk.get('pnr') or '-'))
-    c.drawString(x + 72, top - h + 52, str(bk.get('ticket_number') or '-'))
-    c.drawString(x + 72, top - h + 32, str(ci.get('checkin_no') or '-'))
+    c.setFont('Helvetica', 6.5)
+    c.drawString(x + 18, bottom + 60, _fit(code, 'Helvetica', 6.5, code_w, c))
+    c.setFillColor(muted)
+    c.setFont('Helvetica', 7)
+    c.drawString(x + 18, bottom + 44, _fit(str(payload or ''), 'Helvetica', 7, code_w, c))
+    c.setFont('Helvetica-Bold', 7.5)
+    c.drawString(x + 18, bottom + 28, _fit('BAGS ' + (', '.join(tags[:8]) or str(bag_count)), 'Helvetica-Bold', 7.5, code_w, c))
+    c.setFont('Helvetica', 7)
+    c.drawString(x + 18, bottom + 14, 'Present the QR code at security and the boarding gate.')
+    return bottom - 18
+
+
+def _baggage_tag(c, y, branding, ci, bk, bag, payload):
+    width, _ = A4
+    primary, accent, tint, ink, muted = _brand(branding)
+    ci = ci or {}
+    bk = bk or {}
+    bag = bag or {}
+    x, w = 42, width - 84
+    h = 340
+    top = y
+    if top - h < 56:
+        c.showPage()
+        top = A4[1] - 60
+    bottom = top - h
+    tag = _bag_tag_no(bag) or '-'
+    origin = ci.get('origin') or bk.get('origin') or bag.get('origin') or '-'
+    destination = ci.get('destination') or bk.get('destination') or bag.get('destination') or '-'
+    weight = next((bag.get(k) for k in ('weight_kg', 'weight') if bag.get(k) not in (None, '')),
+                  bk.get('baggage_allowance_kg') if bk.get('baggage_allowance_kg') not in (None, '') else 23)
+    col_w = (w - 60) / 2
+    c.setFillColor(colors.white)
+    c.setStrokeColor(accent)
+    c.setLineWidth(1.2)
+    c.roundRect(x, bottom, w, h, 10, stroke=1, fill=1)
+    c.setFillColor(primary)
+    c.roundRect(x, top - 46, w, 46, 10, stroke=0, fill=1)
+    c.rect(x, top - 50, w, 6, stroke=0, fill=1)
+    c.setFillColor(accent)
+    c.rect(x, top - 50, w, 3, stroke=0, fill=1)
+    c.setFillColor(colors.white)
+    c.setFont('Helvetica-Bold', 16)
+    c.drawString(x + 18, top - 22, 'BAGGAGE TAG')
+    c.setFont('Helvetica-Bold', 9)
+    c.drawRightString(x + w - 18, top - 22, _fit(branding.get('company_name') or 'Fayaka Airline', 'Helvetica-Bold', 9, 180, c))
+    c.setFont('Helvetica', 7.5)
+    c.drawRightString(x + w - 18, top - 36, 'IATA BAGGAGE IDENTIFICATION')
+    c.setFillColor(muted)
+    c.setFont('Helvetica-Bold', 8)
+    c.drawString(x + 18, top - 68, 'BAG TAG NUMBER')
+    c.setFillColor(primary)
+    c.setFont('Helvetica-Bold', 28)
+    c.drawString(x + 18, top - 102, _fit(tag, 'Helvetica-Bold', 28, w - 36, c))
+    _barcode128(c, tag, x + 18, top - 146, w - 36, 36)
+    c.setStrokeColor(accent)
+    c.setDash(4, 3)
+    c.line(x + 12, top - 158, x + w - 12, top - 158)
+    c.setDash()
+    fields = [
+        ('PASSENGER', _iata_name(ci.get('passenger_name') or bk.get('passenger_name') or bag.get('passenger_name'))),
+        ('PNR', bk.get('pnr') or ci.get('pnr') or bag.get('pnr')),
+        ('FLIGHT', ci.get('flight_no') or bk.get('flight_no') or bag.get('flight_no')),
+        ('ROUTE', f"{origin} - {destination}"),
+        ('DATE', ci.get('flight_date') or bk.get('flight_date') or bag.get('flight_date')),
+        ('SEAT', ci.get('seat_no') or bk.get('seat_no') or bag.get('seat_no')),
+        ('CLASS', bk.get('fare_class') or bk.get('cabin_class') or bag.get('cabin_class') or 'Y'),
+        ('WEIGHT', f"{weight} kg"),
+    ]
+    for idx, (label, value) in enumerate(fields):
+        col, row = idx % 2, idx // 2
+        fx = x + 18 + col * col_w
+        fy = top - 178 - row * 24
+        c.setFillColor(muted)
+        c.setFont('Helvetica-Bold', 7.5)
+        c.drawString(fx, fy, str(label))
+        c.setFillColor(ink)
+        c.setFont('Helvetica-Bold', 10.5)
+        c.drawString(fx, fy - 11, _fit(str(value if value not in (None, '') else '-'), 'Helvetica-Bold', 10.5, col_w - 12, c))
+    c.setFillColor(tint)
+    c.setStrokeColor(accent)
+    c.setLineWidth(0.8)
+    c.roundRect(x + 18, bottom + 10, w - 110, 52, 6, stroke=1, fill=1)
+    c.setFillColor(primary)
+    c.setFont('Helvetica-Bold', 8)
+    c.drawString(x + 26, bottom + 50, 'HANDLING INSTRUCTIONS')
+    c.setFillColor(ink)
+    c.setFont('Helvetica', 8)
+    note = str(bag.get('handling_instructions') or 'Handle with care. Do not expose to rain. Retain this tag until baggage claim.')
+    for i, line in enumerate(_lines(note, 72)[:2]):
+        c.drawString(x + 26, bottom + 38 - i * 11, line)
+    c.setFillColor(muted)
+    c.setFont('Helvetica-Bold', 7.5)
+    c.drawString(x + 26, bottom + 14, f"DESTINATION {destination}")
+    _qr(c, payload, x + w - 72, bottom + 10, 56)
+    return bottom - 18
+
+
+def _uplift_coupon(c, y, branding, ci, bk, bag, sale, payload):
+    width, _ = A4
+    primary, accent, tint, ink, muted = _brand(branding)
+    ci = ci or {}
+    bk = bk or {}
+    bag = bag or {}
+    sale = sale or {}
+    x, w = 42, width - 84
+    h = 352
+    top = y
+    if top - h < 56:
+        c.showPage()
+        top = A4[1] - 60
+    bottom = top - h
+    tag = _bag_tag_no(bag) or '-'
+    sale_no = str(sale.get('sale_no') or ci.get('checkin_no') or 'UPLIFT')
+    amount = sale.get('amount') if sale.get('amount') not in (None, '') else 0
+    cur = sale.get('currency') or bk.get('currency') or 'USD'
+    desc = str(sale.get('description') or '')
+    excess = ''
+    if 'excess ' in desc:
+        excess = desc.split('excess ', 1)[-1].split('kg', 1)[0].strip() + ' kg'
+    weight = next((bag.get(k) for k in ('weight_kg', 'weight') if bag.get(k) not in (None, '')),
+                  bk.get('baggage_allowance_kg') if bk.get('baggage_allowance_kg') not in (None, '') else 23)
+    origin = ci.get('origin') or bk.get('origin') or '-'
+    destination = ci.get('destination') or bk.get('destination') or '-'
+    c.setFillColor(colors.white)
+    c.setStrokeColor(accent)
+    c.setLineWidth(1.2)
+    c.roundRect(x, bottom, w, h, 10, stroke=1, fill=1)
+    c.setFillColor(primary)
+    c.roundRect(x, top - 48, w, 48, 10, stroke=0, fill=1)
+    c.rect(x, top - 54, w, 8, stroke=0, fill=1)
+    c.setFillColor(accent)
+    c.rect(x, top - 54, w, 4, stroke=0, fill=1)
+    c.setFillColor(colors.white)
+    c.setFont('Helvetica-Bold', 17)
+    c.drawString(x + 18, top - 22, 'UPLIFT COUPON')
+    c.setFont('Helvetica', 10)
+    c.drawRightString(x + w - 18, top - 22, f"EXCESS BAGGAGE · {sale_no}")
+    c.setFillColor(tint)
+    c.roundRect(x + 18, top - 100, w - 36, 42, 8, stroke=0, fill=1)
+    c.setFillColor(muted)
+    c.setFont('Helvetica-Bold', 8)
+    c.drawString(x + 30, top - 74, 'AMOUNT PAYABLE')
+    c.setFillColor(primary)
+    c.setFont('Helvetica-Bold', 22)
+    c.drawRightString(x + w - 30, top - 80, _money(amount, cur))
+    fields = [
+        ('PASSENGER', _iata_name(ci.get('passenger_name') or bk.get('passenger_name'))),
+        ('PNR', bk.get('pnr') or ci.get('pnr')),
+        ('FLIGHT', ci.get('flight_no') or bk.get('flight_no')),
+        ('ROUTE', f"{origin} - {destination}"),
+        ('DATE', ci.get('flight_date') or bk.get('flight_date')),
+        ('SEAT', ci.get('seat_no') or bk.get('seat_no')),
+        ('BAG TAG', tag),
+        ('WEIGHT', f"{weight} kg"),
+        ('EXCESS', excess or '-'),
+        ('PIECES', sale.get('quantity') or ci.get('bag_count') or 1),
+        ('STATUS', str(sale.get('payment_status') or 'pending').upper()),
+        ('CLASS', bk.get('fare_class') or bk.get('cabin_class') or 'Y'),
+    ]
+    col_w = (w - 60) / 2
+    for idx, (label, value) in enumerate(fields):
+        col, row = idx % 2, idx // 2
+        fx = x + 18 + col * col_w
+        fy = top - 112 - row * 26
+        c.setFillColor(muted)
+        c.setFont('Helvetica-Bold', 7.5)
+        c.drawString(fx, fy, str(label))
+        c.setFillColor(ink)
+        c.setFont('Helvetica-Bold', 10.5)
+        c.drawString(fx, fy - 13, _fit(str(value if value not in (None, '') else '-'), 'Helvetica-Bold', 10.5, col_w - 12, c))
+    c.setStrokeColor(accent)
+    c.setDash(4, 3)
+    c.line(x + 12, top - 266, x + w - 12, top - 266)
+    c.setDash()
+    _barcode128(c, sale_no, x + 18, bottom + 42, w - 140, 28)
+    _qr(c, payload, x + w - 74, bottom + 12, 56)
     c.setFillColor(muted)
     c.setFont('Helvetica', 7.5)
-    c.drawString(x + 18, top - h + 12, 'Scan the QR code at security and the boarding gate.')
-    return top - h - 18
+    c.drawString(x + 18, bottom + 30, _fit('Present this coupon at the baggage drop counter. Charges are final after payment.', 'Helvetica', 7.5, w - 140, c))
+    c.drawString(x + 18, bottom + 14, _fit(f"Reference: {sale_no} · {desc[:72]}", 'Helvetica', 7.5, w - 140, c))
+    return bottom - 18
 
 
 def build_pdf(kind, context, branding):
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)
-    kind_title = {'invoice': 'Invoice', 'booking': 'Booking Confirmation', 'bill': 'Supplier Bill', 'traveler': 'Traveler Statement', 'receipt': 'Payment Receipt', 'estimate': 'Estimate', 'credit_note': 'Credit Note', 'eticket': 'Electronic Ticket', 'boardingpass': 'Boarding Pass', 'journeypass': 'Travel Itinerary'}.get(kind, 'Customer Statement')
+    kind_title = {'invoice': 'Invoice', 'booking': 'Booking Confirmation', 'bill': 'Supplier Bill', 'traveler': 'Traveler Statement', 'receipt': 'Payment Receipt', 'estimate': 'Estimate', 'credit_note': 'Credit Note', 'eticket': 'Electronic Ticket', 'boardingpass': 'Boarding Pass', 'journeypass': 'Travel Itinerary', 'baggagetag': 'Baggage Tag', 'upliftcoupon': 'Uplift Coupon'}.get(kind, 'Customer Statement')
     company = str((branding or {}).get('company_name') or 'Fayaka Airline')
     c.setTitle(f"{kind_title} - {company}")
     c.setAuthor(company)
@@ -664,7 +1006,8 @@ def build_pdf(kind, context, branding):
         if kind == 'boardingpass':
             subtitle = f"{ci.get('checkin_no') or bk.get('pnr') or ''}  |  {str(bk.get('ticket_status') or '').upper()}"
             y = _header(c, branding, 'Boarding Pass', subtitle)
-            y = _boarding_card(c, y, branding, ci, bk, qr_payload)
+            bags = context.get('baggage') or []
+            y = _boarding_card(c, y, branding, ci, bk, qr_payload, bags=bags, bcbp=_bcbp(ci, bk))
         else:
             subtitle = f"{bk.get('pnr') or bk.get('ticket_number') or ''}  |  {str(bk.get('ticket_status') or '').upper()}"
             y = _header(c, branding, 'E-Ticket', subtitle)
@@ -738,6 +1081,41 @@ def build_pdf(kind, context, branding):
         y = _qr_panel(c, y, branding, 'Travel itinerary verification', qr_payload,
                       'Scan to verify booking, ticket and travel details')
 
+    elif kind == 'baggagetag':
+        ci = context.get('checkin') or context.get('pss_checkin') or {}
+        bk = context.get('pss_booking') or context.get('booking') or {}
+        bags = context.get('baggage') or []
+        idx = 0
+        try:
+            idx = int(context.get('bag_index') or 0)
+        except Exception:
+            idx = 0
+        bag = None
+        if bags:
+            try:
+                bag = bags[idx] if 0 <= idx < len(bags) else bags[0]
+            except Exception:
+                bag = bags[0]
+        if not bag:
+            tags = ci.get('bag_tags') or ''
+            if isinstance(tags, (list, tuple)):
+                tags = tags[0] if tags else ''
+            else:
+                tags = str(tags).replace(';', ',').split(',')[0].strip()
+            bag = {'tag_no': tags}
+        subtitle = f"{_bag_tag_no(bag) or ''}  |  {bk.get('pnr') or ''}".strip(' |')
+        y = _header(c, branding, 'Baggage Tag', subtitle)
+        y = _baggage_tag(c, y, branding, ci, bk, bag, qr_payload)
+
+    elif kind == 'upliftcoupon':
+        ci = context.get('checkin') or context.get('pss_checkin') or {}
+        bk = context.get('pss_booking') or context.get('booking') or {}
+        sale = context.get('uplift_sale') or {}
+        bag = _selected_bag(context) or {}
+        subtitle = f"{sale.get('sale_no') or ci.get('checkin_no') or bk.get('pnr') or ''}  |  {bk.get('pnr') or ''}".strip(' |')
+        y = _header(c, branding, 'Uplift Coupon', subtitle)
+        y = _uplift_coupon(c, y, branding, ci, bk, bag, sale, qr_payload)
+
     else:
         customer = context.get('customer') or {}
         subtitle = str(customer.get('name') or '')
@@ -756,7 +1134,7 @@ def build_pdf(kind, context, branding):
         y = _section(c, y, 'Invoices', context.get('invoices') or [], [('invoice_no', 0.28), ('issue_date', 0.18), ('total', 0.18), ('amount_paid', 0.18), ('balance', 0.18)], branding, 'Customer Statement', subtitle)
         y = _section(c, y, 'Documents', context.get('documents') or [], [('title', 0.42), ('category', 0.22), ('file_name', 0.36)], branding, 'Customer Statement', subtitle)
 
-    if kind not in ('boardingpass', 'eticket', 'journeypass'):
+    if kind not in ('boardingpass', 'eticket', 'journeypass', 'baggagetag', 'upliftcoupon'):
         _qr_panel(c, y, branding, 'Document verification', qr_payload,
                   'Scan to verify the reference and authenticity of this document')
     _footer(c, branding)

@@ -11,6 +11,15 @@ Fayaka Airline PSS: multi-tenant airline reservations, distribution and travel E
 - **Payments:** pay the whole PNR with Mobile Money / card / bank / cash reference.
 - **Disruptions:** active disruptions appear as a banner on the portal.
 
+## Flight Inventory module
+- **Flight-date tabs:** choose a date, inspect leg and segment capacity, and preview reservation impact before mass updates.
+- **Leg and Segment controls:** create, edit and delete legs and segments; segment seats drive availability capacity and supplementary information is retained per segment.
+- **Availability:** publish availability by POS and subclass. Availability is segment capacity minus committed reservations, then adjusted by active limit, gate, POS/subclass and TIA rules. The screen polls every 15 seconds for new published versions.
+- **Inventory controls:** business rules support `limit`, `gate`, `pos_subclass` and `hold_expiry`; TIA applies a temporary inventory adjustment percentage. Mass updates can preview reservation impact before changing seats, status, gate or fare.
+- **Exceptions:** overbooking detection, inventory history and queue monitoring are first-class tabs. Resolving overbooking raises capacity and closes related queue items.
+- **Revenue and uncommitted demand:** active valuation, market data snapshots and uncommitted booking holds are managed from the same module. Holds expire automatically and can be confirmed or released.
+- **Self-service support:** the Help tab explains each workflow and includes a problem-solving checklist. If an action fails, copy the exact error path shown in the toast and use the README or contact your administrator.
+
 ## Roles & access
 - **Airline admin** (`owner`) - full access to every module, setup and subscriptions.
 - **Airline accountant** (`fayaka-accounts`) - finance, invoicing, bills, expenses, journals, analytics and documents only; no operational PSS writes.
@@ -124,6 +133,15 @@ Use **Sources & Import → Scan & Import** (workspace) or:
 ```bash
 python import_air.py ../
 ```
+
+## Partner API, webhooks and airline launch tools
+- Open `/docs` for the public Offer → Order API catalog, authentication, error codes, and webhook contract.
+- Use **Control Center → Developer Center** to issue `fk_live_...` API keys, register HTTPS webhook endpoints, copy HMAC signing secrets, retry failed deliveries, and inspect the endpoint catalog.
+- Public endpoints are under `/api/public/v1/`: create a timed offer, fetch it, convert it to an order with unique PNRs, fetch the order, and cancel with automatic seat restoration. Send `X-API-Key` or `Authorization: Bearer <token>`.
+- Webhook events: `offer.created`, `order.created`, `order.cancelled`, `booking.created`, `payment.received`, `disruption.created`, `rebooking.confirmed`, `tenant.onboarded`. Verify `X-Fayaka-Signature: sha256=<HMAC-SHA256(raw body)>`.
+- Use **Finance → Revenue Dashboard** for gross revenue, cash collected, ancillary revenue, refunds, net revenue, daily series, channel and route breakdowns.
+- Use **Operations → Disruptions** to find affected PNRs, select alternate flights, waive fare differences, confirm rebooking, restore old seats, and log passenger notifications.
+- Use **Setup → Airline Onboarding** for the launch checklist and provisioning isolated airline tenants with seeded PSS defaults.
 
 ## Data & deployment
 Local development uses SQLite. For Supabase/PostgreSQL set `DATABASE_URL` (see `.env.example` and `DEPLOYMENT.md`); psycopg is installed from `requirements.txt`. Static front end is ready for Vercel via `vercel.json`; the Python API runs on a container host (Dockerfile/Procfile).
