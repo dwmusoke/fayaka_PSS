@@ -1992,9 +1992,9 @@ async function render_pss_workspace(el){
   const table = (rows, cols, empty) => rows.length
     ? `<div class="table-wrap"><table><thead><tr>${cols.map(c=>`<th>${fieldLabel(c)}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr>${cols.map(c=>`<td>${cellFor(c,r[c])}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`
     : `<div class="empty">${esc(empty)}</div>`;
-  const bRows = bookings.map(b=>({pnr:b.pnr, passenger:b.passenger_name||'-', ticket:b.ticket_number||'-', ticket_status:b.ticket_status||'unissued', payment:b.payment_status||'-', booking:b.booking_status||'-', amount:money(b.total_amount||0,b.currency||currency),
+  const bRows = bookings.map(b=>({pnr:`<button class="mini-btn" data-copy="${esc(b.pnr||'')}" title="Copy PNR">${esc(b.pnr||'-')}</button>`, passenger:b.passenger_name||'-', ticket:(b.ticket_number?`<button class="mini-btn" data-copy="${esc(b.ticket_number)}" title="Copy ticket">${esc(b.ticket_number)}</button>`:'-'), ticket_status:b.ticket_status||'unissued', payment:b.payment_status||'-', booking:b.booking_status||'-', amount:money(b.total_amount||0,b.currency||currency),
     action: (canIssue && b.ticket_status!=='issued' && b.booking_status!=='cancelled') ? `<button class="mini-btn primary" data-issue-booking="${esc(b.id)}">Issue ticket</button>` : (b.ticket_status==='issued'?'<span class="badge ok">Issued</span>':'-')}));
-  const aRows = allocs.map(a=>({allocation_no:a.allocation_no, range:`${a.start_serial} ? ${a.end_serial}`, remaining:Math.max(0,Number(a.end_serial||0)-Number(a.next_serial||a.start_serial||0)+1), amount:money(a.total_amount||0,a.currency||currency), status:a.status||'active'}));
+  const aRows = allocs.map(a=>({allocation_no:`<button class="mini-btn" data-copy="${esc(a.allocation_no||'')}" title="Copy allocation">${esc(a.allocation_no||'-')}</button>`, range:`${a.start_serial} ? ${a.end_serial}`, remaining:Math.max(0,Number(a.end_serial||0)-Number(a.next_serial||a.start_serial||0)+1), amount:money(a.total_amount||0,a.currency||currency), status:a.status||'active'}));
   el.innerHTML = `${pageHead(esc(meta[0]), esc((agency.name||agency.code||meta[1]||'') + (ctx.station_code?` · ${ctx.station_code}`:'')), `<button class="mini-btn secondary" data-goto="agency-wallet">Wallet</button> <button class="mini-btn primary" data-goto="pss-bookings">Bookings</button>`)}
     <div class="grid kpi-row" style="margin-bottom:16px">${kpi('Wallet balance',money(balance,currency),'finance')}${kpi('Stock remaining',remaining,'file')}${kpi('Bookings',bookings.length,'plane')}${kpi('Check-ins',checkins.length,'users')}</div>
     ${panel('My bookings', table(bRows,['pnr','passenger','ticket','ticket_status','payment','booking','amount','action'],'No bookings yet.'), '', 'Issue tickets from your allocated stock. Agency bookings consume only your agency allocation.')}
@@ -2006,6 +2006,7 @@ async function render_pss_workspace(el){
     try{ const r = await api(`/api/pss/bookings/${id}/issue-ticket`, {method:'POST'}); toast(`Ticket issued: ${r.ticket_number||'ok'}`); render_pss_workspace(el); }
     catch(err){ toast(err.message||'Issue failed','error'); btn.disabled = false; }
   }; });
+  $$('[data-copy]', el).forEach(btn=>{ btn.onclick=async()=>{ const v=btn.getAttribute('data-copy'); try{ await navigator.clipboard.writeText(v); toast('Copied '+v); }catch(e){ toast(v); } }; });
 }
 
 async function render_agency_wallet(el){
