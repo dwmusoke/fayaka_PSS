@@ -1494,7 +1494,9 @@ CREATE TABLE IF NOT EXISTS pss_inventory_queue (
   issue_type TEXT NOT NULL,
   severity TEXT DEFAULT 'warning',
   flight_id INTEGER,
-  message TEXT,
+  assignee TEXT,
+  notes TEXT,
+  message TEXT NOT NULL,
   status TEXT DEFAULT 'open',
   created_at TEXT NOT NULL,
   resolved_at TEXT
@@ -2680,6 +2682,7 @@ def ensure_pss(conn):
                                    ('currency', "TEXT DEFAULT 'USD'"), ('wallet_tx_id', 'INTEGER')]),
         ('pss_inventory_rules', [('nest_type', "TEXT DEFAULT 'none'"), ('nest_bucket', 'TEXT'), ('priority', 'INTEGER DEFAULT 100'),
                                  ('flight_id', 'INTEGER'), ('flight_date', 'TEXT'), ('segment_id', 'INTEGER')]),
+        ('pss_inventory_queue', [('assignee', 'TEXT'), ('severity', "TEXT DEFAULT 'warning'"), ('notes', 'TEXT')]),
     ]:
         existing = {r['name'] for r in q(conn, f"PRAGMA table_info({table})")}
         for col, ddl in cols:

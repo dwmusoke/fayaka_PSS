@@ -4880,26 +4880,53 @@ class Handler(BaseHTTPRequestHandler):
     def api_inventory_overbooking_resolve(self, tenant_id, user_id):
         data = read_json(self)
         fid = self._oid(data.get('flight_id'))
+        action = (data.get('action') or 'raise_capacity').strip().lower()
         with db() as conn:
             f = q(conn, "SELECT * FROM pss_flights WHERE id=? AND tenant_id=?", (fid, tenant_id), one=True)
             if not f:
                 return self._json({'error': 'Flight not found'}, 404)
             _, committed = self._inv_counts(conn, tenant_id, fid)
-            new_total = max(int(f.get('total_seats') or 0), committed)
-            conn.execute("UPDATE pss_flights SET total_seats=?,available_seats=?,updated_at=? WHERE id=? AND tenant_id=?",
-                         (new_total, max(0, new_total - committed), now_iso(), fid, tenant_id))
-            self._inv_baseline(conn, tenant_id)
-            conn.execute("""UPDATE pss_inventory_segments SET seats=?,updated_at=?
-                            WHERE tenant_id=? AND status='active' AND leg_id IN
-                            (SELECT id FROM pss_inventory_legs WHERE tenant_id=? AND flight_id=?)""",
-                         (new_total, now_iso(), tenant_id, tenant_id, fid))
-            conn.execute("""UPDATE pss_inventory_queue SET status='resolved',resolved_at=?
+            result = {'action': action, 'committed': committed}
+            if action == 'raise_capacity':
+                new_total = max(int(f.get('total_seats') or 0), committed)
+                conn.execute("UPDATE pss_flights SET total_seats=?,available_seats=?,updated_at=? WHERE id=? AND tenant_id=?",
+                             (new_total, max(0, new_total - committed), now_iso(), fid, tenant_id))
+                self._inv_baseline(conn, tenant_id)
+                conn.execute("""UPDATE pss_inventory_segments SET seats=?,updated_at=?
+                                WHERE tenant_id=? AND status='active' AND leg_id IN
+                                (SELECT id FROM pss_inventory_legs WHERE tenant_id=? AND flight_id=?)""",
+                             (new_total, now_iso(), tenant_id, tenant_id, fid))
+                result['total_seats'] = new_total
+            elif action == 'deny_sale':
+                conn.execute("UPDATE pss_flights SET status='closed',updated_at=? WHERE id=? AND tenant_id=?", (now_iso(), fid, tenant_id))
+                result['status'] = 'closed'
+            elif action == 'reaccommodate':
+                alt = q(conn, """SELECT id,flight_no,available_seats FROM pss_flights
+                                 WHERE tenant_id=? AND id<>? AND origin=? AND destination=? AND flight_date>=?
+                                   AND COALESCE(status,'scheduled') NOT IN ('cancelled','closed') AND available_seats>0
+                                 ORDER BY flight_date, dep_time LIMIT 1""",
+                        (tenant_id, fid, f.get('origin'), f.get('destination'), f.get('flight_date')), one=True)
+                if not alt:
+                    return self._json({'error': 'No alternate flight with seats found'}, 409)
+                hold = q(conn, """SELECT id,pnr FROM pss_bookings
+                                  WHERE tenant_id=? AND flight_id=? AND COALESCE(booking_status,'confirmed')='hold'
+                                  ORDER BY id DESC LIMIT 1""", (tenant_id, fid), one=True)
+                if hold:
+                    conn.execute("UPDATE pss_bookings SET flight_id=?,updated_at=? WHERE id=? AND tenant_id=?",
+                                 (alt['id'], now_iso(), hold['id'], tenant_id))
+                    conn.execute("UPDATE pss_flights SET available_seats=available_seats+1,updated_at=? WHERE id=? AND tenant_id=?", (now_iso(), fid, tenant_id))
+                    conn.execute("UPDATE pss_flights SET available_seats=available_seats-1,updated_at=? WHERE id=? AND tenant_id=?", (now_iso(), alt['id'], tenant_id))
+                    result['rebooked_pnr'] = hold.get('pnr')
+                result['alternate_flight'] = alt.get('flight_no')
+            else:
+                return self._json({'error': 'action must be raise_capacity, deny_sale, or reaccommodate'}, 400)
+
+            conn.execute("""UPDATE pss_inventory_queue SET status='resolved',resolved_at=?,notes=COALESCE(notes,'')||?
                             WHERE tenant_id=? AND flight_id=? AND issue_type='overbooking' AND status='open'""",
-                         (now_iso(), tenant_id, fid))
-            self._inv_log(conn, tenant_id, 'flight', fid, 'overbooking_resolved', dict(f),
-                          {'total_seats': new_total, 'available_seats': max(0, new_total - committed)}, user_id)
-            log_audit(conn, tenant_id, user_id, 'inventory_overbooking_resolved', 'pss_flight', fid, {'committed': committed})
-        return self._json({'ok': True, 'committed': committed})
+                         (now_iso(), f" [{action} by {user_id}]", tenant_id, fid))
+            self._inv_log(conn, tenant_id, 'flight', fid, 'overbooking_' + action, dict(f), result, user_id)
+            log_audit(conn, tenant_id, user_id, 'inventory_overbooking_' + action, 'pss_flight', fid, result)
+        return self._json({'ok': True, **result})
 
     def api_inventory_history(self, tenant_id):
         with db() as conn:
@@ -4907,11 +4934,25 @@ class Handler(BaseHTTPRequestHandler):
                               ORDER BY id DESC LIMIT 300""", (tenant_id,))
         return self._json({'history': rows})
 
-    def api_inventory_queue(self, tenant_id):
+    def api_inventory_queue(self, tenant_id, method='GET', qid=None, user_id=None):
+        qid = self._oid(qid)
         with db() as conn:
-            rows = q(conn, """SELECT q.*, f.flight_no FROM pss_inventory_queue q
+            if method == 'PUT' and qid:
+                data = read_json(self)
+                row = q(conn, "SELECT * FROM pss_inventory_queue WHERE id=? AND tenant_id=?", (qid, tenant_id), one=True)
+                if not row:
+                    return self._json({'error': 'Queue item not found'}, 404)
+                conn.execute("""UPDATE pss_inventory_queue SET assignee=?,severity=?,notes=?,status=?,resolved_at=?
+                                WHERE id=? AND tenant_id=?""",
+                             (data.get('assignee', row.get('assignee')), data.get('severity', row.get('severity')),
+                              data.get('notes', row.get('notes')), data.get('status', row.get('status')),
+                              now_iso() if data.get('status') == 'resolved' else row.get('resolved_at'), qid, tenant_id))
+                self._inv_log(conn, tenant_id, 'queue', qid, 'queue_updated', dict(row), data, user_id)
+                return self._json({'ok': True})
+            rows = q(conn, """SELECT q.*, f.flight_no, f.flight_date FROM pss_inventory_queue q
                               LEFT JOIN pss_flights f ON f.id=q.flight_id
-                              WHERE q.tenant_id=? ORDER BY q.id DESC LIMIT 300""", (tenant_id,))
+                              WHERE q.tenant_id=? ORDER BY CASE q.severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END, q.id DESC""",
+                     (tenant_id,))
         return self._json({'queue': rows})
 
     def api_inventory_queue_resolve(self, tenant_id, user_id, rid):
