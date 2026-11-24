@@ -4546,7 +4546,7 @@ class Handler(BaseHTTPRequestHandler):
                          AND status='active'""", (tenant_id, tenant_id, flight['id']), one=True)
         return int((seg or {}).get('n') or 0) or int(flight.get('total_seats') or 0)
 
-    def _inv_compute(self, conn, tenant_id, flight, pos, subclass):
+    def _inv_compute(self, conn, tenant_id, flight, pos, subclass, segment_id=0):
         capacity = self._inv_capacity(conn, tenant_id, flight)
         params = [tenant_id, flight['id']]
         sql = """SELECT COUNT(*) n FROM pss_bookings b
@@ -4557,6 +4557,7 @@ class Handler(BaseHTTPRequestHandler):
         if subclass != 'ALL':
             sql += " AND b.fare_class=?"; params.append(subclass)
         committed = int((q(conn, sql, params, one=True) or {}).get('n') or 0)
+        seg_id = self._oid(segment_id) or 0
         rules = q(conn, """SELECT * FROM pss_inventory_rules
                            WHERE tenant_id=? AND status='active'
                            AND (pos='ALL' OR pos=?) AND (subclass='ALL' OR subclass=?)
@@ -4564,7 +4565,7 @@ class Handler(BaseHTTPRequestHandler):
                            AND (flight_date IS NULL OR flight_date='' OR flight_date=?)
                            AND (segment_id IS NULL OR segment_id=?)
                            ORDER BY priority ASC, id ASC""",
-                  (tenant_id, pos, subclass, flight['id'], flight.get('flight_date'), None))
+                  (tenant_id, pos, subclass, flight['id'], flight.get('flight_date'), seg_id or None))
         cap = capacity
         nest_caps = {'serial': cap, 'parallel': cap, 'mixed': cap}
         for r in rules:
@@ -4618,7 +4619,9 @@ class Handler(BaseHTTPRequestHandler):
             for pos in channels:
                 for subclass in subclasses:
                     values = self._inv_compute(conn, tenant_id, f, pos, subclass)
-                    for sid in ([0] + [int(s['id']) for s in segs]) if segs else [0]:
+                    seg_ids = ([0] + [int(s['id']) for s in segs]) if segs else [0]
+                    for sid in seg_ids:
+                        seg_vals = self._inv_compute(conn, tenant_id, f, pos, subclass, sid)
                         existing = q(conn, """SELECT id,version FROM pss_inventory_availability
                                               WHERE tenant_id=? AND flight_id=? AND segment_id=? AND pos=? AND pos_subclass=?""",
                                      (tenant_id, f['id'], sid, pos, subclass), one=True)
@@ -4626,14 +4629,14 @@ class Handler(BaseHTTPRequestHandler):
                             conn.execute("""UPDATE pss_inventory_availability
                                             SET leg_id=?,available=?,capacity=?,committed=?,published_at=?,version=version+1,updated_at=?
                                             WHERE id=?""",
-                                         (int(legs[0]['id']) if legs else 0, values['available'], values['adjusted_capacity'],
-                                          values['committed'], ts, ts, existing['id']))
+                                         (int(legs[0]['id']) if legs else 0, seg_vals['available'], seg_vals['adjusted_capacity'],
+                                          seg_vals['committed'], ts, ts, existing['id']))
                         else:
                             conn.execute("""INSERT INTO pss_inventory_availability
                                             (tenant_id,flight_id,leg_id,segment_id,pos,pos_subclass,available,capacity,committed,published_at,version,created_at,updated_at)
                                             VALUES (?,?,?,?,?,?,?,?,?,?,1,?,?)""",
                                          (tenant_id, f['id'], int(legs[0]['id']) if legs else 0, sid, pos, subclass,
-                                          values['available'], values['adjusted_capacity'], values['committed'], ts, ts, ts))
+                                          seg_vals['available'], seg_vals['adjusted_capacity'], seg_vals['committed'], ts, ts, ts))
                         published += 1
         if actor:
             self._inv_log(conn, tenant_id, 'availability', 'ALL', 'published', {}, {'rows': published}, actor)
