@@ -1083,6 +1083,11 @@ CREATE TABLE IF NOT EXISTS pss_stock_allocations (
   end_serial INTEGER,
   next_serial INTEGER,
   allocated_to TEXT,
+  agency_id INTEGER,
+  unit_price DOUBLE PRECISION DEFAULT 0,
+  total_amount DOUBLE PRECISION DEFAULT 0,
+  currency TEXT DEFAULT 'USD',
+  wallet_tx_id INTEGER,
   status TEXT DEFAULT 'active',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -1090,6 +1095,46 @@ CREATE TABLE IF NOT EXISTS pss_stock_allocations (
   FOREIGN KEY(pool_id) REFERENCES pss_stock_pools(id),
   FOREIGN KEY(channel_id) REFERENCES pss_channels(id)
 );
+
+CREATE TABLE IF NOT EXISTS pss_agency_wallets (
+  id SERIAL PRIMARY KEY ,
+  tenant_id INTEGER NOT NULL,
+  agency_id INTEGER NOT NULL,
+  currency TEXT DEFAULT 'USD',
+  balance DOUBLE PRECISION DEFAULT 0,
+  status TEXT DEFAULT 'active',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(tenant_id, agency_id, currency)
+);
+
+CREATE TABLE IF NOT EXISTS pss_wallet_transactions (
+  id SERIAL PRIMARY KEY ,
+  tenant_id INTEGER NOT NULL,
+  agency_id INTEGER NOT NULL,
+  wallet_id INTEGER,
+  tx_no TEXT NOT NULL,
+  tx_type TEXT NOT NULL,
+  direction TEXT NOT NULL,
+  amount DOUBLE PRECISION DEFAULT 0,
+  currency TEXT DEFAULT 'USD',
+  balance_before DOUBLE PRECISION DEFAULT 0,
+  balance_after DOUBLE PRECISION DEFAULT 0,
+  reference TEXT,
+  gateway_ref TEXT,
+  status TEXT DEFAULT 'pending',
+  method TEXT,
+  allocation_id INTEGER,
+  notes TEXT,
+  raw_json TEXT,
+  created_by INTEGER,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(tenant_id, tx_no)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pss_wallet_tx_agency ON pss_wallet_transactions(tenant_id, agency_id, id);
+CREATE INDEX IF NOT EXISTS idx_pss_wallet_tx_ref ON pss_wallet_transactions(tenant_id, gateway_ref);
 
 CREATE TABLE IF NOT EXISTS pss_flights (
   id SERIAL PRIMARY KEY ,

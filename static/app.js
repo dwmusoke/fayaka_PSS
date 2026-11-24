@@ -7,7 +7,8 @@ function stopInventoryPoll(){ if(INVENTORY_UI.poll){ clearInterval(INVENTORY_UI.
 const $ = (s, r=document) => r.querySelector(s);
 const $$ = (s, r=document) => Array.from(r.querySelectorAll(s));
 const fmt = (n) => (n===null||n===undefined||n==='') ? '-' : (typeof n==='number' ? n.toLocaleString(undefined,{maximumFractionDigits:2}) : n);
-const money = (n, c='USD') => (n===null||n===undefined) ? '-' : `${c} ${Number(n).toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2})}`;
+const defaultCurrency = ()=> (state.branding && state.branding.currency) || (state.session && state.session.currency) || 'USD';
+const money = (n, c) => { const cur = c || defaultCurrency(); return (n===null||n===undefined) ? '-' : `${cur} ${Number(n).toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2})}`; };
 const esc = (s) => String(s??'').replace(/[&<>"']/g, m=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[m]));
 const icon = (n) => `<svg class="icon"><use href="#i-${n}"></use></svg>`;
 const today = () => new Date().toISOString().slice(0,10);
@@ -543,6 +544,11 @@ const CREATE_SCHEMAS = {
     sel('method',SELECT_OPTS.payment_method,false,'cash'),txt('reference'),num('amount',true),
     sel('currency',CURRENCIES,false,'USD'),dat('paid_at',false,()=>today()),area('notes')
   ]},
+  'pss-payments':{fields:[
+    num('booking_id',true),txt('pnr'),num('amount',true),sel('currency',CURRENCIES,false,'USD'),
+    sel('method',SELECT_OPTS.payment_method,false,'cash'),txt('reference'),txt('gateway_ref'),
+    sel('status',['captured','paid','pending','failed','refunded'],false,'captured'),dat('paid_at',false,()=>today()),area('notes')
+  ]},
   invoicing:{fields:[
     txt('invoice_no'),num('customer_id'),num('order_id'),dat('issue_date',false,()=>today()),dat('due_date'),
     sel('currency',CURRENCIES,false,'USD'),num('subtotal'),num('tax'),num('fees'),num('discount'),num('total'),
@@ -767,10 +773,10 @@ async function renderList(name, el, pageArg){
             `<button type="button" class="mini-btn" id="copy-customer-${esc(id)}">Copy details</button>`,
             `<button type="button" class="mini-btn" data-share-customer="${esc(id)}">Share profile</button>`
           ].filter(Boolean).join('');
-          const linkedHtml = linked.length?`<div class="profile-linked"><h4>Linked travelers</h4>${linked.map(t=>`<div class="profile-contact"><b>${esc(t.full_name||t.display_name||[t.first_name,t.last_name].filter(Boolean).join(' ')||'Traveler')}</b><div class="muted tiny">${[t.email,t.phone||t.mobile,t.nationality,t.doc_no].filter(Boolean).map(v=>esc(v)).join(' · ')||'No contact details'}</div></div>`).join('')}</div>`:'';
-          showModal(`Customer profile · ${row.name||row.company||btn.getAttribute('data-ref')||id}`,
+          const linkedHtml = linked.length?`<div class="profile-linked"><h4>Linked travelers</h4>${linked.map(t=>`<div class="profile-contact"><b>${esc(t.full_name||t.display_name||[t.first_name,t.last_name].filter(Boolean).join(' ')||'Traveler')}</b><div class="muted tiny">${[t.email,t.phone||t.mobile,t.nationality,t.doc_no].filter(Boolean).map(v=>esc(v)).join(' A� ')||'No contact details'}</div></div>`).join('')}</div>`:'';
+          showModal(`Customer profile A� ${row.name||row.company||btn.getAttribute('data-ref')||id}`,
             `<div class="profile-hero"><div class="profile-avatar">${esc(recordInitials(row.name||row.company||id))}</div>
-              <div class="profile-identity"><h3>${esc(row.name||row.company||'Customer')}</h3><div class="muted">${[row.company,row.type,row.loyalty_id].filter(Boolean).map(v=>esc(v)).join(' · ')||'Customer profile'}</div></div>
+              <div class="profile-identity"><h3>${esc(row.name||row.company||'Customer')}</h3><div class="muted">${[row.company,row.type,row.loyalty_id].filter(Boolean).map(v=>esc(v)).join(' A� ')||'Customer profile'}</div></div>
               ${row.status||row.type?statusBadge(row.status||row.type):''}</div>
              <div class="profile-actions cta-row">${quick}</div>
              <div class="profile-grid">${info.map(([k,v])=>`<div><label>${fieldLabel(k)}</label><div>${k==='Email'&&v?`<a href="mailto:${esc(v)}">${esc(v)}</a>`:(k==='Phone'&&v?`<a href="tel:${esc(phoneDigits(v)||v)}">${esc(v)}</a>`:esc(v))}</div></div>`).join('')}</div>
@@ -786,6 +792,23 @@ async function renderList(name, el, pageArg){
           };
           const sh = $('[data-share-customer="'+id+'"]');
           if(sh) sh.onclick = ()=>openShareDialog('crm', String(id), String(row.name||row.company||id));
+          return;
+        }
+        if(name==='pss-bookings'){
+          let detail = {};
+          try{ detail = await api(`/api/pss/bookings/${encodeURIComponent(id)}`); }catch(e){ detail = {booking: row}; }
+          const b = detail.booking || row || {};
+          const payments = detail.payments || [];
+          const checkins = detail.checkins || [];
+          const events = detail.events || [];
+          const payRows = payments.length ? `<div class="table-wrap"><table><thead><tr><th>Payment</th><th>Date</th><th>Method</th><th>Amount</th><th>Status</th></tr></thead><tbody>${payments.map(p=>`<tr><td>${esc(p.payment_no||'-')}</td><td>${esc((p.paid_at||p.created_at||'').slice(0,10))}</td><td>${esc((p.method||'').replace(/_/g,' '))}</td><td>${money(Number(p.amount||0),p.currency||b.currency||defaultCurrency())}</td><td>${statusBadge(p.status||'')}</td></tr>`).join('')}</tbody></table></div>` : '<div class="muted tiny">No payments recorded.</div>';
+          const checkinRows = checkins.length ? `<div class="table-wrap"><table><thead><tr><th>Check-in</th><th>Seat</th><th>Bags</th><th>Status</th><th>Time</th></tr></thead><tbody>${checkins.map(c=>`<tr><td>${esc(c.checkin_no||'-')}</td><td>${esc(c.seat_no||'-')}</td><td>${esc(c.bag_count??0)}</td><td>${statusBadge(c.status||'')}</td><td>${esc((c.checked_in_at||c.created_at||'').slice(0,16).replace('T',' '))}</td></tr>`).join('')}</tbody></table></div>` : '<div class="muted tiny">No check-ins.</div>';
+          showModal(`Booking A� ${esc(b.pnr||btn.getAttribute('data-ref')||id)}`,
+            `<div class="form-cols">${fields.map(k=>`<div><label>${fieldLabel(k)}</label><div>${cellFor(k,b[k]!==undefined?b[k]:row[k])}</div></div>`).join('')}</div>
+             <div style="margin-top:14px"><h4>Payments</h4>${payRows}</div>
+             <div style="margin-top:14px"><h4>Check-ins</h4>${checkinRows}</div>
+             ${events.length?`<div style="margin-top:14px"><h4>Ticket events</h4><div class="table-wrap"><table><thead><tr><th>Status</th><th>Reason</th><th>Actor</th><th>Date</th></tr></thead><tbody>${events.map(ev=>`<tr><td>${statusBadge(ev.ticket_status||ev.previous_status||'')}</td><td>${esc(ev.reason||'-')}</td><td>${esc(ev.actor||'-')}</td><td>${esc((ev.created_at||'').slice(0,16).replace('T',' '))}</td></tr>`).join('')}</tbody></table></div></div>`:''}
+             <div class="cta-row"><button type="button" class="secondary" onclick="hideModal()">Close</button></div>`);
           return;
         }
         showModal(`${btn.textContent} · ${btn.getAttribute('data-ref')||id}`,
@@ -913,7 +936,7 @@ function docBodyEnd(){ return `</div>`; }
 function docFooter(p){
   return `<div class="doc-foot">${esc(p.footer||'Thank you for travelling with us. This document is generated from your booking and may be shared with the client.')}</div>`;
 }
-function moneyDoc(v,c){ return v===null||v===undefined||v===''?'-':money(Number(v||0),c||'USD'); }
+function moneyDoc(v,c){ return v===null||v===undefined||v===''?'-':money(Number(v||0),c||defaultCurrency()); }
 function kv(label,val){ return `<div class="doc-kv"><div class="doc-kv-label">${esc(label)}</div><div class="doc-kv-value">${esc(val||'-')}</div></div>`; }
 function docTable(head,rows){
   const h=`<thead><tr>${head.map(h=>`<th class="doc-table-head">${esc(h)}</th>`).join('')}</tr></thead>`;
@@ -1114,7 +1137,7 @@ function docContent(kind,data,p){
       </div>
       <h4 class="doc-section-title">Journey segments</h4>
       ${docTable(['Flight','Route','Date','Depart','Arrive','Status','Seat'],[[b.flight_no||'-',b.origin+' → '+b.destination,b.flight_date||'-',b.dep_time||'-',b.arr_time||'-',b.ticket_status||'unissued',b.seat_no||'-']])}
-      ${data.tax_lines.length?`<h4 class="doc-section-title">Taxes &amp; fees</h4>${docTable(['Code','Description','Amount'],data.tax_lines.map(t=>[t.tax_code,t.description,moneyDoc(t.amount,t.currency)]))}`:''}
+      ${data.tax_lines.length?`<h4 class="doc-section-title">Taxes &amp; fees</h4>${docTable(['Code','Description','Amount'],data.tax_lines.map(t=>[t.tax_code,t.description,moneyDoc(t.amount,t.currency||data.booking?.currency||data.pss_booking?.currency||defaultCurrency())]))}`:''}
       <div class="doc-note"><b>Trace ID:</b> ${esc(b.trace_id||'-')}&nbsp;&nbsp;<b>Channel:</b> ${esc(b.channel_name||'-')}</div>
     `;
     case 'itinerary': return `
@@ -1128,7 +1151,7 @@ function docContent(kind,data,p){
     `;
     case 'invoice': return `<div class="doc-cols">
       <div style="flex:1">${kv('Invoice no',data.invoice.invoice_no||'-')}${kv('Customer',data.invoice.customer_name||'-')}${kv('Issue date',data.invoice.issue_date||'-')}</div>
-      <div style="flex:1">${kv('Due date',data.invoice.due_date||'-')}${kv('Status',data.invoice.status||'issued')}${kv('Currency',data.invoice.currency||'USD')}</div>
+      <div style="flex:1">${kv('Due date',data.invoice.due_date||'-')}${kv('Status',data.invoice.status||'issued')}${kv('Currency',data.invoice.currency||defaultCurrency())}</div>
     </div>
     <h4 class="doc-section-title">Invoice lines</h4>
     ${docTable(['Description','Qty','Unit price','Tax','Line total'],[['Travel services','1',moneyDoc(data.invoice.subtotal),moneyDoc(data.invoice.tax),moneyDoc(data.invoice.total)]])}
@@ -1903,41 +1926,58 @@ async function render_pss_channels(el){
 }
 
 async function render_agency_wallet(el){
-  const meta = viewMeta['agency-wallet'] || ['Agency Wallet','Agency stock allocations, remaining ticket serials and settlement view','Airline PSS'];
-  let d = {};
-  try{ d = await api('/api/pss/stock'); }
+  const meta = viewMeta['agency-wallet'] || ['Agency Wallet','Agency wallet credit, Flutterwave top-ups and stock allocations','Airline PSS'];
+  let d = {}, ag = {agencies:[]};
+  try{ [d, ag] = await Promise.all([api('/api/pss/stock'), api('/api/pss/agencies').catch(()=>({agencies:[]}))]); }
   catch(e){
     el.innerHTML = `${pageHead(esc(meta[0]), esc(meta[1]||''), '')}<div class="panel"><div class="panel-body error">${esc(e.message||String(e))}</div></div>`;
     return;
   }
+  const wallets = Array.isArray(d.wallets) ? d.wallets : [];
   const allocs = Array.isArray(d.allocations) ? d.allocations : [];
-  const wallets = {};
-  allocs.forEach(a=>{
-    const name = a.allocated_to || (a.channel_id?'Channel '+a.channel_id:'Counter') || 'Unassigned';
-    const w = wallets[name] || (wallets[name] = {name, allocations:0, issued:0, remaining:0});
-    w.allocations += 1;
-    w.issued += Math.max(0, Number(a.next_serial||a.start_serial||0) - Number(a.start_serial||0));
-    w.remaining += Math.max(0, Number(a.end_serial||0) - Number(a.next_serial||a.start_serial||0) + 1);
-  });
-  const walletRows = Object.values(wallets);
+  const txs = Array.isArray(d.wallet_transactions) ? d.wallet_transactions : [];
+  const agencies = Array.isArray(ag.agencies) ? ag.agencies : [];
+  const totalBalance = wallets.reduce((s,w)=>s+Number(w.balance||0),0);
+  const currency = wallets[0]?.currency || d.pools?.[0]?.currency || 'USD';
   const table = (rows, cols, empty) => rows.length
     ? `<div class="table-wrap"><table><thead><tr>${cols.map(c=>`<th>${fieldLabel(c)}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr>${cols.map(c=>`<td>${cellFor(c,r[c])}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`
     : `<div class="empty">${esc(empty)}</div>`;
-  const allocView = allocs.map(a=>({
-    allocation_no:a.allocation_no,
-    allocated_to:a.allocated_to||'-',
-    prefix:a.prefix||'-',
-    quantity:a.quantity,
-    range:`${a.start_serial} – ${a.end_serial}`,
-    remaining:Math.max(0, Number(a.end_serial||0)-Number(a.next_serial||a.start_serial||0)+1),
-    status:a.status||'active'
-  }));
-  el.innerHTML = `${pageHead(esc(meta[0]), esc(meta[1]||''), `<button class="mini-btn primary" data-goto="pss-stock">Open ticket stock</button>`)}
-    <div class="grid kpi-row" style="margin-bottom:16px">${kpi('Agencies',walletRows.length,'users')}${kpi('Allocations',allocs.length,'file')}${kpi('Tickets issued',walletRows.reduce((s,w)=>s+w.issued,0),'chart')}${kpi('Remaining',walletRows.reduce((s,w)=>s+w.remaining,0),'finance')}</div>
-    ${panel('Agency stock wallets', table(walletRows,['name','allocations','issued','remaining'],'No agency allocations yet.'), '', '')}
-    ${panel('Allocation ledger', table(allocView,['allocation_no','allocated_to','prefix','quantity','range','remaining','status'],'No allocations yet.'), '', '')}`;
-  el.querySelectorAll('[data-goto]').forEach(btn=>{
-    btn.onclick = ()=> setView(btn.getAttribute('data-goto'));
+  const walletRows = wallets.map(w=>({agency:w.agency_name||w.agency_code||w.agency_id, balance:money(w.balance||0,w.currency||currency), allocations:w.allocations||0, allocated_amount:money(w.allocated_amount||0,w.currency||currency), status:w.status||'active'}));
+  const allocView = allocs.map(a=>({allocation_no:a.allocation_no, agency:a.agency_name||a.allocated_to||'-', range:`${a.start_serial} ? ${a.end_serial}`, amount:money(a.total_amount||0,a.currency||currency), remaining:Math.max(0,Number(a.end_serial||0)-Number(a.next_serial||a.start_serial||0)+1), status:a.status||'active'}));
+  const txView = txs.map(t=>({tx_no:t.tx_no, agency:t.agency_name||t.agency_id, type:t.tx_type, amount:money(t.direction==='debit'?-Math.abs(t.amount||0):t.amount||0,t.currency||currency), status:t.status, reference:t.reference||t.gateway_ref||'-', created_at:t.created_at}));
+  el.innerHTML = `${pageHead(esc(meta[0]), esc(meta[1]||''), `<button class="mini-btn secondary" data-action="topup-wallet">Top up wallet</button> <button class="mini-btn primary" data-goto="pss-stock">Allocate stock</button>`)}
+    <div class="grid kpi-row" style="margin-bottom:16px">${kpi('Agencies',wallets.length,'users')}${kpi('Wallet balance',money(totalBalance,currency),'finance')}${kpi('Allocations',allocs.length,'file')}${kpi('Top-ups/Txns',txs.length,'chart')}</div>
+    ${panel('Agency wallets', table(walletRows,['agency','balance','allocations','allocated_amount','status'],'No agency wallets yet.'), '', 'Wallet credit is debited when stock is allocated at a unit price.')}
+    ${panel('Wallet transactions', table(txView,['tx_no','agency','type','amount','status','reference','created_at'],'No wallet transactions yet.'), '', 'Flutterwave top-ups and allocation debits.')}
+    ${panel('Allocation ledger', table(allocView,['allocation_no','agency','range','amount','remaining','status'],'No allocations yet.'), '', '')}`;
+
+  el.querySelectorAll('[data-goto]').forEach(btn=>{ btn.onclick = ()=> setView(btn.getAttribute('data-goto')); });
+  const pendingRef = sessionStorage.getItem('walletTopupRef');
+  if(pendingRef){
+    sessionStorage.removeItem('walletTopupRef');
+    api('/api/pss/wallets/topup/verify?tx_ref='+encodeURIComponent(pendingRef)).then(r=>{ if(r.verified){ toast('Wallet top-up verified'); render_agency_wallet(el); } }).catch(()=>{});
+  }
+  el.querySelector('[data-action="topup-wallet"]')?.addEventListener('click', ()=>{
+    const agencyOpts = agencies.map(a=>`<option value="${esc(a.id)}">${esc(a.name||a.code||('Agency '+a.id))}</option>`).join('') || '<option value="">No agencies found</option>';
+    showModal('Top up agency wallet', `<form id="f-wallet-topup" class="form-grid">
+      <div class="form-cols"><div><label>Agency *</label><select name="agency_id" required>${agencyOpts}</select></div><div><label>Amount *</label><input name="amount" type="number" min="1" step="0.01" required></div></div>
+      <div class="form-cols"><div><label>Currency</label><input name="currency" value="${esc(currency)}"></div><div><label>Phone (optional)</label><input name="phone" placeholder="Mobile Money number"></div></div>
+      <div><label>Email (optional)</label><input name="email" type="email" placeholder="agency@example.com"></div>
+      <div class="muted tiny">Uses configured Flutterwave gateway. In demo mode (no secret key), verification is immediate.</div>
+      <div class="cta-row"><button type="submit" class="primary">Continue to Flutterwave</button><button type="button" class="secondary mini-btn" onclick="hideModal()">Cancel</button></div>
+      <div id="f-wallet-topup-msg" class="small"></div></form>`);
+    const form = $('#f-wallet-topup');
+    if(form) form.onsubmit = async (e)=>{
+      e.preventDefault();
+      const msg = $('#f-wallet-topup-msg'); if(msg){ msg.textContent=''; msg.className='small'; }
+      const data = Object.fromEntries(new FormData(form).entries());
+      data.redirect_url = location.origin + location.pathname + '#agency-wallet';
+      try{
+        const r = await api('/api/pss/wallets/topup', {method:'POST', body: JSON.stringify(data)});
+        if(r.tx_ref) sessionStorage.setItem('walletTopupRef', r.tx_ref);
+        if(r.url){ toast('Redirecting to Flutterwave'); hideModal(); if(r.demo){ await api('/api/pss/wallets/topup/verify?tx_ref='+encodeURIComponent(r.tx_ref)); render_agency_wallet(el); } else location.href = r.url; }
+      }catch(err){ if(msg){ msg.textContent=err.message; msg.className='small error'; } else toast(err.message,'error'); }
+    };
   });
 }
 
@@ -2586,13 +2626,16 @@ async function renderView(name){
 }
 
 async function renderPssStock(el){
-  const [d, ch] = await Promise.all([
-    api('/api/pss/stock'),
-    api('/api/setup/pss-channels').catch(()=>({channels:[]}))
-  ]);
-  const pools = d.pools || [];
-  const allocs = d.allocations || [];
-  const channels = ch.channels || [];
+    const [d, ch, ag] = await Promise.all([
+      api('/api/pss/stock'),
+      api('/api/setup/pss-channels').catch(()=>({channels:[]})),
+      api('/api/pss/agencies').catch(()=>({agencies:[]}))
+    ]);
+    const pools = d.pools || [];
+    const allocs = d.allocations || [];
+    const channels = ch.channels || [];
+    const agencies = ag.agencies || [];
+    const wallets = d.wallets || [];
   const poolRows = pools.map(p=>`<tr>
     <td>${esc(p.pool_no||'-')}</td>
     <td>${esc(p.airline_code||'-')} / ${esc(p.prefix||'-')}</td>
@@ -2604,9 +2647,9 @@ async function renderPssStock(el){
     <td><button class="mini-btn secondary" data-pss-pool-del="${esc(p.id)}">Delete</button></td>
   </tr>`).join('') || '<tr><td colspan="8" class="empty">No stock pools yet</td></tr>';
   const allocRows = allocs.map(a=>`<tr>
-    <td>${esc(a.allocation_no||a.id)}</td><td>${esc(a.prefix||'-')}</td><td>${esc(a.start_serial)}–${esc(a.end_serial)}</td>
-    <td>${esc(a.next_serial)}</td><td>${esc(a.remaining)}</td><td>${esc(a.allocated_to||a.airport_code||a.channel_id||'-')}</td><td>${statusBadge(a.status||'active')}</td>
-  </tr>`).join('') || '<tr><td colspan="7" class="empty">No allocations</td></tr>';
+    <td>${esc(a.allocation_no||a.id)}</td><td>${esc(a.agency_name||a.allocated_to||a.airport_code||a.channel_id||'-')}</td><td>${esc(a.prefix||'-')}</td><td>${esc(a.start_serial)}�?"${esc(a.end_serial)}</td>
+    <td>${esc(a.next_serial)}</td><td>${esc(a.remaining)}</td><td>${money(a.total_amount||0, a.currency||'USD')}</td><td>${statusBadge(a.status||'active')}</td>
+  </tr>`).join('') || '<tr><td colspan="8" class="empty">No allocations</td></tr>';
 
   const poolForm = `<form id="f-pss-stock-pool" class="form-grid">
     <div class="form-cols"><div><label>Pool number</label><input name="pool_no" placeholder="e.g. POOL-001 (auto if blank)"></div><div><label>Status</label><select name="status"><option value="active">active</option><option value="inactive">inactive</option></select></div></div>
@@ -2619,19 +2662,26 @@ async function renderPssStock(el){
   </form>`;
   const poolOpts = pools.map(p=>`<option value="${esc(p.id)}">${esc(p.pool_no||'Pool '+p.id)} ${esc(p.prefix||'')} · ${esc(p.remaining||0)} left</option>`).join('') || '<option value="">No pools available</option>';
   const channelOpts = channels.map(c=>`<option value="${esc(c.id)}">${esc(c.name||c.code||'Channel '+c.id)}</option>`).join('') || '<option value="">Direct / counter</option>';
+  const agencyOpts = `<option value="">No agency (counter/channel)</option>` + agencies.map(a=>`<option value="${esc(a.id)}">${esc(a.name||a.code||('Agency '+a.id))}</option>`).join('');
   const allocForm = `<form id="f-pss-allocate" class="form-grid">
     <div class="form-cols"><div><label>Stock pool *</label><select name="pool_id" required>${poolOpts}</select></div><div><label>Quantity *</label><input name="quantity" type="number" min="1" value="10" required></div></div>
+    <div class="form-cols"><div><label>Agency (wallet debit)</label><select name="agency_id">${agencyOpts}</select></div><div><label>Unit price</label><input name="unit_price" type="number" min="0" step="0.01" value="0"></div></div>
     <div class="form-cols"><div><label>Channel</label><select name="channel_id">${channelOpts}</select></div><div><label>Airport code</label><input name="airport_code" placeholder="e.g. KLA"></div></div>
-    <div><label>Allocate to</label><input name="allocated_to" placeholder="Agency, desk or channel name"></div>
+    <div><label>Allocate to label</label><input name="allocated_to" placeholder="Optional display label"></div>
+    <div class="muted tiny">If agency and unit price are set, allocation debits agency wallet credit. Top up wallets from Agency Wallet.</div>
     <div class="cta-row"><button type="submit" class="primary">Allocate stock</button><button type="button" class="secondary mini-btn" onclick="hideModal()">Cancel</button></div>
     <div id="f-pss-allocate-msg" class="small"></div>
   </form>`;
+  const walletRows = wallets.map(w=>`<tr><td>${esc(w.agency_name||w.agency_id)}</td><td>${money(w.balance||0,w.currency||'USD')}</td><td>${esc(w.allocations||0)}</td><td>${money(w.allocated_amount||0,w.currency||'USD')}</td></tr>`).join('') || '<tr><td colspan="4" class="empty">No agency wallets yet</td></tr>';
   el.innerHTML = `${pageHead('Ticket Stock','Create and manage ticket stock pools and allocations.', `<button class="mini-btn secondary" data-action="allocate-stock">Allocate stock</button> <button class="mini-btn primary" data-action="create-pool">+ New stock pool</button>`)}
   <div class="panel"><div class="panel-head"><h3>Stock pools</h3><span class="badge info">${pools.length}</span></div><div class="panel-body">
     <div class="table-wrap"><table><thead><tr><th>Pool</th><th>Airline/Prefix</th><th>Range</th><th>Next</th><th>Remaining</th><th>Location</th><th>Status</th><th></th></tr></thead><tbody>${poolRows}</tbody></table></div>
   </div></div>
+  <div class="panel" style="margin-top:16px"><div class="panel-head"><h3>Agency wallets</h3><span class="badge info">${wallets.length}</span></div><div class="panel-body">
+    <div class="table-wrap"><table><thead><tr><th>Agency</th><th>Balance</th><th>Allocations</th><th>Allocated amount</th></tr></thead><tbody>${walletRows}</tbody></table></div>
+  </div></div>
   <div class="panel" style="margin-top:16px"><div class="panel-head"><h3>Allocations</h3><span class="badge info">${allocs.length}</span></div><div class="panel-body">
-    <div class="table-wrap"><table><thead><tr><th>Allocation</th><th>Prefix</th><th>Range</th><th>Next</th><th>Remaining</th><th>Allocated to</th><th>Status</th></tr></thead><tbody>${allocRows}</tbody></table></div>
+    <div class="table-wrap"><table><thead><tr><th>Allocation</th><th>Agency/Allocated to</th><th>Prefix</th><th>Range</th><th>Next</th><th>Remaining</th><th>Amount</th><th>Status</th></tr></thead><tbody>${allocRows}</tbody></table></div>
   </div></div>`;
 
   el.querySelectorAll('[data-action="allocate-stock"]').forEach(btn=>{

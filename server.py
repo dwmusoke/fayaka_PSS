@@ -351,6 +351,9 @@ SESSION_TTL = 7 * 86400
 SESSION_IDLE = 25 * 60
 _SECURE_COOKIES_ENV = os.environ.get('SECURE_COOKIES')
 PBKDF2_ITERATIONS = 210_000
+LOGIN_LOCKOUT_MAX = int(os.environ.get('LOGIN_LOCKOUT_MAX', '5'))
+LOGIN_LOCKOUT_SECONDS = int(os.environ.get('LOGIN_LOCKOUT_SECONDS', '900'))
+LOGIN_LOCKOUT_ENABLED = os.environ.get('LOGIN_LOCKOUT_DISABLED', '').lower() not in ('1', 'true', 'yes') and LOGIN_LOCKOUT_MAX > 0
 MAX_BODY = int(os.environ.get('MAX_BODY_MB', '10')) * 1024 * 1024
 PORT = int(os.environ.get('PORT', 8000))
 SECRET_KEY = os.environ.get('SECRET_KEY', 'dev-change-me-in-prod')
@@ -416,6 +419,26 @@ def _password_policy_error(pw):
     return None
 
 
+def _client_ip(handler):
+    headers = getattr(handler, 'headers', None)
+    for name in ('CF-Connecting-IP', 'X-Real-IP', 'X-Forwarded-For'):
+        val = (headers.get(name) or '').strip() if headers else ''
+        if not val:
+            continue
+        val = val.split(',')[0].strip().strip('"').strip("'")
+        if val:
+            return val
+    try:
+        return handler.client_address[0] if handler.client_address else 'unknown'
+    except Exception:
+        return 'unknown'
+
+
+def _login_ident(handler, scope, account):
+    ip = _client_ip(handler)
+    return scope + ':' + hashlib.sha256(f"{ip}|{(account or '').lower()}".encode()).hexdigest()[:16]
+
+
 def _client_hash(handler):
     try:
         ip = handler.client_address[0] if handler.client_address else ''
@@ -429,17 +452,22 @@ def _client_hash(handler):
 
 
 def _note_login_fail(key):
+    if not LOGIN_LOCKOUT_ENABLED:
+        return
     with _LOGIN_FAIL_LOCK:
         lst = _LOGIN_FAILS.setdefault(key, [])
         lst.append(time.time())
-        del lst[:-5]
+        del lst[:-LOGIN_LOCKOUT_MAX]
 
 
 def _login_locked_until(key):
+    if not LOGIN_LOCKOUT_ENABLED:
+        return None
     with _LOGIN_FAIL_LOCK:
         lst = _LOGIN_FAILS.get(key) or []
-        recent = [t for t in lst if time.time() - t < 900]
-        return recent[-1] + 900 if len(recent) >= 5 else None
+        cutoff = time.time() - LOGIN_LOCKOUT_SECONDS
+        recent = [t for t in lst if t >= cutoff]
+        return recent[-1] + LOGIN_LOCKOUT_SECONDS if len(recent) >= LOGIN_LOCKOUT_MAX else None
 
 
 def _note_login_success(key):
@@ -607,7 +635,7 @@ def apply_subscription_payment_success(conn, tenant_id, invoice_id, payment_row,
         txid = str((gateway_data or {}).get('id') or payment_row.get('transaction_id') or '')
         flw_ref = str((gateway_data or {}).get('flw_ref') or payment_row.get('flw_ref') or '')
         amount = float((gateway_data or {}).get('amount') or payment_row.get('amount') or inv.get('amount') or 0)
-        currency = (gateway_data or {}).get('currency') or payment_row.get('currency') or inv.get('currency') or 'USD'
+        currency = (gateway_data or {}).get('currency') or payment_row.get('currency') or inv.get('currency') or self._tenant_currency(conn, tenant_id) or 'USD'
         method = (gateway_data or {}).get('payment_type') or payment_row.get('payment_method') or 'mobilemoney'
         cust = (gateway_data or {}).get('customer') or {}
         conn.execute("""UPDATE subscription_payments SET status='successful', transaction_id=?, flw_ref=?, amount=?, currency=?, payment_method=?, customer_phone=COALESCE(?,customer_phone), customer_email=COALESCE(?,customer_email), raw_json=?, verified_at=? WHERE id=?""",
@@ -1094,18 +1122,28 @@ class Handler(BaseHTTPRequestHandler):
                 return self.api_pss_checkin_create(tenant_id, user_id, sess=sess)
             if path == '/api/pss/payments' and method == 'GET':
                 return self.api_pss_payments(tenant_id, sess=sess)
+            if path == '/api/pss/payments' and method == 'POST':
+                return self.api_pss_payment_create(tenant_id, user_id, sess=sess)
             if path.startswith('/api/pss/payments/') and method in ('GET', 'PUT'):
                 return self.api_pss_payment_mutate(tenant_id, path.rsplit('/', 1)[-1], method)
             if path == '/api/pss/stock' and method == 'GET':
-                return self.api_pss_stock(tenant_id)
+                return self.api_pss_stock(tenant_id, sess=sess)
             if path == '/api/pss/stock' and method == 'POST':
                 return self.api_pss_stock_create(tenant_id, user_id)
             if path == '/api/pss/allocations' and method == 'GET':
-                return self.api_pss_allocations(tenant_id)
+                return self.api_pss_allocations(tenant_id, sess=sess)
             if path == '/api/pss/stock/allocate' and method == 'POST':
-                return self.api_pss_stock_allocate(tenant_id, user_id)
+                return self.api_pss_stock_allocate(tenant_id, user_id, sess=sess)
             if path == '/api/pss/stock/issue' and method == 'POST':
                 return self.api_pss_stock_issue(tenant_id, user_id)
+            if path == '/api/pss/wallets' and method == 'GET':
+                return self.api_pss_wallets(tenant_id, sess=sess)
+            if path == '/api/pss/wallets/topup' and method == 'POST':
+                return self.api_pss_wallet_topup_init(tenant_id, user_id, sess=sess)
+            if path == '/api/pss/wallets/topup/verify' and method == 'GET':
+                return self.api_pss_wallet_topup_verify(tenant_id, qs, sess=sess)
+            if path == '/api/pss/wallets/transactions' and method == 'GET':
+                return self.api_pss_wallet_transactions(tenant_id, qs, sess=sess)
             if path.startswith('/api/pss/stock/') and method in ('PUT', 'DELETE'):
                 tail = path.rsplit('/', 1)[-1]
                 if tail not in ('allocate', 'issue'):
@@ -1373,11 +1411,13 @@ class Handler(BaseHTTPRequestHandler):
         username = (data.get('username') or '').strip()
         password = data.get('password') or ''
         ip = self.client_address[0] if self.client_address else 'unknown'
-        fail_key = 'airline:' + hashlib.sha256(str(ip).encode()).hexdigest()[:16]
+        fail_key = _login_ident(self, 'airline', f"{tenant_code}|{username}")
         locked_until = _login_locked_until(fail_key)
         if locked_until and locked_until > time.time():
-            print(f"[login] locked ip={ip}", file=sys.stderr)
-            return self._json({'error': 'Too many failed attempts. Try again later.'}, 401)
+            print(f"[login] locked key={fail_key}", file=sys.stderr)
+            retry = max(1, int(locked_until - time.time()))
+            return self._json({'error': 'Too many failed attempts. Try again later.', 'retry_after': retry},
+                              401, headers={'Retry-After': str(retry)})
         with db() as conn:
             t = q(conn, "SELECT * FROM tenants WHERE code=? AND status='active'", (tenant_code,), one=True)
             if not t:
@@ -1454,7 +1494,10 @@ class Handler(BaseHTTPRequestHandler):
             branding = self._branding(conn, sess['tenant_id'])
         if branding:
             branding['logo_data_set'] = bool(branding.get('logo_data'))
-        return self._json({'session': sess, 'plan': plan, 'usage': usage, 'branding': branding})
+        currency = (branding or {}).get('currency') or self._tenant_currency(conn, sess['tenant_id'])
+        sess_out = dict(sess)
+        sess_out['currency'] = currency
+        return self._json({'session': sess_out, 'plan': plan, 'usage': usage, 'branding': branding, 'currency': currency})
 
     def api_dashboard(self, tenant_id):
         with db() as conn:
@@ -1538,7 +1581,7 @@ class Handler(BaseHTTPRequestHandler):
             sell = float(data.get('total_sell') or 0); cost = float(data.get('total_cost') or 0)
             cur = conn.execute("""INSERT INTO orders(tenant_id,source_type,source_id,pnr,order_number,office_id,customer_id,product_type,status,ticket_status,tktl,booking_date,travel_start,travel_end,origin,destination,currency,total_sell,total_cost,margin,balance_due,notes,created_at,updated_at)
                                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                               (tenant_id, src, source_id, pnr, pnr, data.get('office_id'), data.get('customer_id'), data.get('product_type') or 'Flight', 'booked', data.get('ticket_status') or 'unticketed', data.get('tktl'), ts[:10], data.get('travel_start'), data.get('travel_end'), data.get('origin'), data.get('destination'), data.get('currency') or 'USD', sell, cost, sell-cost, sell, data.get('notes'), ts, ts))
+                               (tenant_id, src, source_id, pnr, pnr, data.get('office_id'), data.get('customer_id'), data.get('product_type') or 'Flight', 'booked', data.get('ticket_status') or 'unticketed', data.get('tktl'), ts[:10], data.get('travel_start'), data.get('travel_end'), data.get('origin'), data.get('destination'), data.get('currency') or self._tenant_currency(conn, tenant_id) or 'USD', sell, cost, sell-cost, sell, data.get('notes'), ts, ts))
             oid = cur.lastrowid
             traveler_id = self._oid(data.get('traveler_id'))
             if traveler_id:
@@ -1722,7 +1765,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 cur2 = conn.execute("""INSERT INTO orders(tenant_id,source_type,source_id,connector_id,raw_document_id,pnr,order_number,status,ticket_status,origin,destination,travel_start,travel_end,currency,total_sell,total_cost,margin,balance_due,notes,created_at,updated_at)
                                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                                    (tenant_id, source_type, str(source_id), connector_id, raw_id, pnr, pnr, payload.get('status') or 'booked', payload.get('ticket_status') or 'unticketed', payload.get('origin'), payload.get('destination'), payload.get('travel_start'), payload.get('travel_end'), payload.get('currency') or 'USD', total_sell, total_cost, total_sell-total_cost, total_sell, payload.get('notes'), ts, ts))
+                                    (tenant_id, source_type, str(source_id), connector_id, raw_id, pnr, pnr, payload.get('status') or 'booked', payload.get('ticket_status') or 'unticketed', payload.get('origin'), payload.get('destination'), payload.get('travel_start'), payload.get('travel_end'), payload.get('currency') or self._tenant_currency(conn, tenant_id) or 'USD', total_sell, total_cost, total_sell-total_cost, total_sell, payload.get('notes'), ts, ts))
                 oid = cur2.lastrowid
                 conn.execute("INSERT INTO order_status_history(tenant_id,order_id,status,note,source,created_at) VALUES (?,?,?,?,?,?)", (tenant_id, oid, payload.get('status') or 'booked', 'Ingested payload', source_type, ts))
                 action = 'imported'
@@ -1782,7 +1825,7 @@ class Handler(BaseHTTPRequestHandler):
                 due_date = (datetime.utcnow() + timedelta(days=days)).strftime('%Y-%m-%d')
             cur = conn.execute("""INSERT INTO invoices(tenant_id,branch_id,order_id,customer_id,invoice_no,kind,status,issue_date,due_date,currency,subtotal,tax,fees,discount,total,amount_paid,balance,notes,created_at,agency_id,source)
                                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                                (tenant_id, data.get('branch_id'), order_id, customer_id, inv_no, data.get('kind') or 'invoice', 'issued', ts[:10], due_date, data.get('currency') or 'USD', subtotal, tax, fees, discount, total, 0, total, data.get('notes'), ts, agency_id, 'agency' if agency_id else 'backoffice'))
+                                (tenant_id, data.get('branch_id'), order_id, customer_id, inv_no, data.get('kind') or 'invoice', 'issued', ts[:10], due_date, data.get('currency') or self._tenant_currency(conn, tenant_id) or 'USD', subtotal, tax, fees, discount, total, 0, total, data.get('notes'), ts, agency_id, 'agency' if agency_id else 'backoffice'))
 
             iid = cur.lastrowid
             lines = data.get('lines') or [{"description": data.get('description') or 'Travel services', 'qty':1, 'unit_cost': float(data.get('unit_cost') or 0), 'unit_price': subtotal, 'tax': tax, 'line_total': total}]
@@ -1790,7 +1833,7 @@ class Handler(BaseHTTPRequestHandler):
                 conn.execute("INSERT INTO invoice_lines(tenant_id,invoice_id,description,qty,unit_cost,unit_price,tax,line_total) VALUES (?,?,?,?,?,?,?,?)",
                              (tenant_id, iid, ln.get('description'), float(ln.get('qty') or 1), float(ln.get('unit_cost') or 0), float(ln.get('unit_price') or 0), float(ln.get('tax') or 0), float(ln.get('line_total') or 0)))
             conn.execute("INSERT INTO journals(tenant_id,ref_type,ref_id,entry_date,memo,debit_account,credit_account,amount,currency,created_at,agency_id,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                         (tenant_id, 'invoice', iid, ts[:10], f"Invoice {inv_no}", 'Accounts Receivable', 'Sales', total, data.get('currency') or 'USD', ts, agency_id, 'agency' if agency_id else 'backoffice'))
+                         (tenant_id, 'invoice', iid, ts[:10], f"Invoice {inv_no}", 'Accounts Receivable', 'Sales', total, data.get('currency') or self._tenant_currency(conn, tenant_id) or 'USD', ts, agency_id, 'agency' if agency_id else 'backoffice'))
             if order_id:
                 conn.execute("UPDATE orders SET total_sell=?, balance_due=?, updated_at=? WHERE id=?", (total, total, ts, order_id))
                 _recompute_order(conn, tenant_id, order_id)
@@ -1831,13 +1874,13 @@ class Handler(BaseHTTPRequestHandler):
             pno = data.get('payment_no') or f"PMT-{ts[:4]}-{n:05d}"
             cur = conn.execute("""INSERT INTO payments(tenant_id,branch_id,invoice_id,order_id,customer_id,payment_no,method,reference,amount,currency,status,paid_at,notes,created_at,agency_id,source)
                                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                               (tenant_id, data.get('branch_id'), invoice_id, order_id, customer_id, pno, data.get('method') or 'cash', data.get('reference'), amount, data.get('currency') or 'USD', 'received', ts[:10], data.get('notes'), ts, agency_id, 'agency' if agency_id else 'backoffice'))
+                               (tenant_id, data.get('branch_id'), invoice_id, order_id, customer_id, pno, data.get('method') or 'cash', data.get('reference'), amount, data.get('currency') or self._tenant_currency(conn, tenant_id) or 'USD', 'received', ts[:10], data.get('notes'), ts, agency_id, 'agency' if agency_id else 'backoffice'))
             pid = cur.lastrowid
             if invoice_id:
                 conn.execute("INSERT INTO allocations(tenant_id,payment_id,invoice_id,amount,created_at) VALUES (?,?,?,?,?)", (tenant_id, pid, invoice_id, amount, ts))
                 recompute_invoice(conn, invoice_id)
             conn.execute("INSERT INTO journals(tenant_id,ref_type,ref_id,entry_date,memo,debit_account,credit_account,amount,currency,created_at,agency_id,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                         (tenant_id, 'payment', pid, ts[:10], f"Payment {pno}", 'Petty Cash', 'Accounts Receivable', amount, data.get('currency') or 'USD', ts, agency_id, 'agency' if agency_id else 'backoffice'))
+                         (tenant_id, 'payment', pid, ts[:10], f"Payment {pno}", 'Petty Cash', 'Accounts Receivable', amount, data.get('currency') or self._tenant_currency(conn, tenant_id) or 'USD', ts, agency_id, 'agency' if agency_id else 'backoffice'))
             log_audit(conn, tenant_id, user_id, 'create', 'payment', pid, {'payment_no': pno})
         return self._json({'ok': True, 'payment_id': pid, 'payment_no': pno})
 
@@ -2152,7 +2195,7 @@ class Handler(BaseHTTPRequestHandler):
             if not plan:
                 return self._json({'error': 'Plan not found'}, 404)
             amount = float(plan.get('price_monthly') or 0) * (12 if cycle == 'yearly' else 1)
-            currency = (data.get('currency') or 'USD').upper()
+            currency = (data.get('currency') or self._tenant_currency(conn, tenant_id) or 'USD').upper()
             # allow override if Flutterwave MoMo currency differs (e.g. UGX) by passing amount/currency
             if data.get('amount') is not None:
                 try: amount = float(data.get('amount'))
@@ -2290,6 +2333,29 @@ class Handler(BaseHTTPRequestHandler):
         data_obj = payload.get('data') or {}
         meta = data_obj.get('meta') or {}
         tx_ref = data_obj.get('tx_ref') or payload.get('tx_ref')
+        if tx_ref and str(tx_ref).upper().startswith('WTX-'):
+            with db() as conn:
+                tx = q(conn, "SELECT * FROM pss_wallet_transactions WHERE gateway_ref=? OR tx_no=? ORDER BY id DESC LIMIT 1",
+                       (str(tx_ref), str(tx_ref)), one=True)
+                if not tx:
+                    return self._json({'ok': True, 'ignored': True, 'reason': 'wallet transaction not found'})
+                gw = get_billing_gateway(conn, tenant_id=tx['tenant_id'], provider='flutterwave')
+                if not gw or not gw.get('secret_key'):
+                    return self._json({'ok': False, 'message': 'Gateway not configured'}, 400)
+                if gw.get('webhook_secret'):
+                    sent = self.headers.get('verif-hash') or self.headers.get('Verif-Hash') or ''
+                    if not hmac.compare_digest(str(sent), str(gw.get('webhook_secret'))):
+                        return self._json({'error': 'Invalid webhook signature'}, 401)
+                status, resp = flutterwave_verify(gw.get('secret_key'), tx_ref=str(tx_ref),
+                                                  transaction_id=data_obj.get('id') or payload.get('id'))
+                vdata = (resp or {}).get('data') or {}
+                amount_ok = float(vdata.get('amount') or 0) >= float(tx.get('amount') or 0)
+                currency_ok = str(vdata.get('currency') or '').upper() == str(tx.get('currency') or '').upper()
+                if (status not in (200, 201) or str(vdata.get('status') or '').lower() != 'successful'
+                        or not amount_ok or not currency_ok):
+                    return self._json({'ok': False, 'message': 'Payment verification failed'}, 400)
+                self._apply_wallet_topup(conn, str(tx_ref), resp)
+            return self._json({'ok': True, 'wallet': True})
         if tx_ref and str(tx_ref).upper().startswith('PSS-'):
             with db() as conn:
                 pay = q(conn, "SELECT * FROM pss_payments WHERE gateway_ref=? OR payment_no=? OR reference=? ORDER BY id DESC LIMIT 1",
@@ -2519,8 +2585,8 @@ class Handler(BaseHTTPRequestHandler):
             brand = q(conn, "SELECT * FROM tenant_branding WHERE tenant_id=?", (tenant_id,), one=True) or {}
             logo_data = data.get('logo_data') if 'logo_data' in data else (brand.get('logo_data') or '')
             logo_text = data.get('logo_text') or brand.get('logo_text') or (company[:3].upper() if company else 'TE')
-            primary = data.get('primary_color') or brand.get('primary_color') or '#0f2742'
-            accent = data.get('accent_color') or brand.get('accent_color') or '#0b6efd'
+            primary = data.get('primary_color') or brand.get('primary_color') or '#206090'
+            accent = data.get('accent_color') or brand.get('accent_color') or '#e02020'
             footer = data.get('footer_note') if 'footer_note' in data else (brand.get('footer_note') or 'Generated by Travel ERP - Confidential')
             conn.execute("""INSERT INTO tenant_branding(tenant_id,company_name,legal_name,location,address,phone,email,website,tax_id,logo_text,logo_data,primary_color,accent_color,footer_note,updated_at)
                             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
@@ -2630,7 +2696,7 @@ class Handler(BaseHTTPRequestHandler):
                                                           expiry_date,ticket_status,refund_status,value,currency,notes,created_at,updated_at)
                                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                              (tenant_id, ticket, b.get('pnr'), b.get('passenger_name'), None, issue, travel,
-                              expiry, ticket_status, refund_status, value, b.get('currency') or 'USD', notes, ts, ts))
+                              expiry, ticket_status, refund_status, value, b.get('currency') or self._tenant_currency(conn, tenant_id) or 'USD', notes, ts, ts))
                 created += 1
             elif (existing.get('ticket_status') != ticket_status or existing.get('refund_status') != refund_status) and ticket_status != 'unused':
                 conn.execute("UPDATE unused_tickets SET ticket_status=?,refund_status=?,updated_at=? WHERE id=? AND tenant_id=?",
@@ -2660,7 +2726,7 @@ class Handler(BaseHTTPRequestHandler):
                                                 policy_check,auto_void,status,requested_at,processed_at,notes,created_at,updated_at)
                             VALUES (?,?,?,?,?,'unused_ticket','ticket_not_used',?,?,'passed',?,?,?,?,?,?,?)""",
                          (tenant_id, refund_no, b.get('pnr'), ticket, b.get('passenger_name'), amount,
-                          b.get('currency') or 'USD', 1, 'processed', ts, ts, 'Auto-created from refunded e-ticket', ts, ts))
+                          b.get('currency') or self._tenant_currency(conn, tenant_id) or 'USD', 1, 'processed', ts, ts, 'Auto-created from refunded e-ticket', ts, ts))
             made += 1
         return made
 
@@ -2739,7 +2805,7 @@ class Handler(BaseHTTPRequestHandler):
                                                     policy_check,auto_void,status,requested_at,notes,created_at,updated_at)
                                 VALUES (?,?,?,?,?,'unused_ticket','unused_ticket_refund',?,?,'passed',?,?,?,?,?,?)""",
                              (tenant_id, refund_no, row.get('pnr'), row.get('ticket_no'), row.get('traveler_name'),
-                              amount, row.get('currency') or 'USD', 0, 'pending', ts,
+                              amount, row.get('currency') or self._tenant_currency(conn, tenant_id) or 'USD', 0, 'pending', ts,
                               data.get('notes') or 'Refund requested from unused tickets', ts, ts))
             conn.execute("UPDATE unused_tickets SET refund_status='requested',updated_at=? WHERE id=? AND tenant_id=?",
                          (now_iso(), row['id'], tenant_id))
@@ -3365,7 +3431,7 @@ class Handler(BaseHTTPRequestHandler):
             agency_id = (sess or {}).get('agency_id')
             cur = conn.execute("""INSERT INTO estimates(tenant_id,branch_id,estimate_no,customer_id,title,description,currency,subtotal,tax,total,status,valid_until,created_by,created_at,updated_at,agency_id)
                                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                               (tenant_id, data.get('branch_id'), est_no, self._oid(data.get('customer_id')), title, data.get('description'), data.get('currency') or 'USD', subtotal, tax, total, data.get('status') or 'draft', data.get('valid_until'), user_id, ts, ts, agency_id))
+                               (tenant_id, data.get('branch_id'), est_no, self._oid(data.get('customer_id')), title, data.get('description'), data.get('currency') or self._tenant_currency(conn, tenant_id) or 'USD', subtotal, tax, total, data.get('status') or 'draft', data.get('valid_until'), user_id, ts, ts, agency_id))
             eid = cur.lastrowid
             log_audit(conn, tenant_id, user_id, 'create', 'estimate', eid, {'estimate_no': est_no})
         return self._json({'ok': True, 'estimate_id': eid, 'estimate_no': est_no})
@@ -3432,10 +3498,10 @@ class Handler(BaseHTTPRequestHandler):
             agency_id = (sess or {}).get('agency_id')
             cur = conn.execute("""INSERT INTO credit_notes(tenant_id,branch_id,credit_note_no,customer_id,invoice_id,reason,description,currency,amount,status,issue_date,created_by,created_at,agency_id)
                                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                               (tenant_id, data.get('branch_id'), cn_no, self._oid(data.get('customer_id')), self._oid(data.get('invoice_id')), data.get('reason') or 'refund', data.get('description'), data.get('currency') or 'USD', amount, 'issued', data.get('issue_date') or ts[:10], user_id, ts, agency_id))
+                               (tenant_id, data.get('branch_id'), cn_no, self._oid(data.get('customer_id')), self._oid(data.get('invoice_id')), data.get('reason') or 'refund', data.get('description'), data.get('currency') or self._tenant_currency(conn, tenant_id) or 'USD', amount, 'issued', data.get('issue_date') or ts[:10], user_id, ts, agency_id))
             cid = cur.lastrowid
             conn.execute("INSERT INTO journals(tenant_id,ref_type,ref_id,entry_date,memo,debit_account,credit_account,amount,currency,created_at,agency_id,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                         (tenant_id, 'credit_note', cid, ts[:10], f"Credit note {cn_no}", 'Sales', 'Accounts Receivable', amount, data.get('currency') or 'USD', ts, agency_id, 'credit_note'))
+                         (tenant_id, 'credit_note', cid, ts[:10], f"Credit note {cn_no}", 'Sales', 'Accounts Receivable', amount, data.get('currency') or self._tenant_currency(conn, tenant_id) or 'USD', ts, agency_id, 'credit_note'))
             log_audit(conn, tenant_id, user_id, 'create', 'credit_note', cid, {'credit_note_no': cn_no})
         return self._json({'ok': True, 'credit_note_id': cid, 'credit_note_no': cn_no})
 
@@ -3520,10 +3586,10 @@ class Handler(BaseHTTPRequestHandler):
             bill_no = data.get('bill_no') or f"BILL-{ts[:4]}-{n:05d}"
             cur = conn.execute("""INSERT INTO bills(tenant_id,branch_id,bill_no,supplier,description,order_id,account_code,category,currency,subtotal,tax,total,amount_paid,balance,bill_date,due_date,status,created_by,created_at,updated_at)
                                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?,?)""",
-                               (tenant_id, data.get('branch_id'), bill_no, supplier, data.get('description'), self._oid(data.get('order_id')), data.get('account_code') or '1150', data.get('category') or 'supplier', data.get('currency') or 'USD', subtotal, tax, total, total, data.get('bill_date') or ts[:10], data.get('due_date'), 'open', user_id, ts, ts))
+                               (tenant_id, data.get('branch_id'), bill_no, supplier, data.get('description'), self._oid(data.get('order_id')), data.get('account_code') or '1150', data.get('category') or 'supplier', data.get('currency') or self._tenant_currency(conn, tenant_id) or 'USD', subtotal, tax, total, total, data.get('bill_date') or ts[:10], data.get('due_date'), 'open', user_id, ts, ts))
             bid = cur.lastrowid
             conn.execute("INSERT INTO journals(tenant_id,ref_type,ref_id,entry_date,memo,debit_account,credit_account,amount,currency,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                         (tenant_id, 'bill', bid, ts[:10], f"Bill {bill_no} - {supplier}", data.get('account_code') or '1150', 'Accounts Payable', total, data.get('currency') or 'USD', ts))
+                         (tenant_id, 'bill', bid, ts[:10], f"Bill {bill_no} - {supplier}", data.get('account_code') or '1150', 'Accounts Payable', total, data.get('currency') or self._tenant_currency(conn, tenant_id) or 'USD', ts))
             log_audit(conn, tenant_id, user_id, 'create', 'bill', bid, {'bill_no': bill_no})
         return self._json({'ok': True, 'bill_id': bid, 'bill_no': bill_no})
 
@@ -3600,10 +3666,10 @@ class Handler(BaseHTTPRequestHandler):
             exp_no = data.get('expense_no') or f"EXP-{ts[:4]}-{n:05d}"
             cur = conn.execute("""INSERT INTO expenses(tenant_id,branch_id,expense_no,category,vendor,description,account_code,amount,currency,expense_date,status,payment_method,reference,receipt_no,agency_id,created_by,created_at,updated_at)
                                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                               (tenant_id, data.get('branch_id'), exp_no, data.get('category') or 'operating', data.get('vendor'), data.get('description'), data.get('account_code') or '1300', amount, data.get('currency') or 'USD', data.get('expense_date') or ts[:10], data.get('status') or 'posted', data.get('payment_method') or 'cash', data.get('reference'), data.get('receipt_no'), (sess or {}).get('agency_id'), user_id, ts, ts))
+                               (tenant_id, data.get('branch_id'), exp_no, data.get('category') or 'operating', data.get('vendor'), data.get('description'), data.get('account_code') or '1300', amount, data.get('currency') or self._tenant_currency(conn, tenant_id) or 'USD', data.get('expense_date') or ts[:10], data.get('status') or 'posted', data.get('payment_method') or 'cash', data.get('reference'), data.get('receipt_no'), (sess or {}).get('agency_id'), user_id, ts, ts))
             eid = cur.lastrowid
             conn.execute("INSERT INTO journals(tenant_id,ref_type,ref_id,entry_date,memo,debit_account,credit_account,amount,currency,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                         (tenant_id, 'expense', eid, ts[:10], f"Expense {exp_no}", data.get('account_code') or '1300', 'Petty Cash', amount, data.get('currency') or 'USD', ts))
+                         (tenant_id, 'expense', eid, ts[:10], f"Expense {exp_no}", data.get('account_code') or '1300', 'Petty Cash', amount, data.get('currency') or self._tenant_currency(conn, tenant_id) or 'USD', ts))
             log_audit(conn, tenant_id, user_id, 'create', 'expense', eid, {'expense_no': exp_no})
         return self._json({'ok': True, 'expense_id': eid, 'expense_no': exp_no})
 
@@ -3653,7 +3719,7 @@ class Handler(BaseHTTPRequestHandler):
         ts = now_iso()
         with db() as conn:
             conn.execute("INSERT INTO journals(tenant_id,ref_type,ref_id,entry_date,memo,debit_account,credit_account,amount,currency,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                         (tenant_id, 'manual', None, data.get('entry_date') or ts[:10], data.get('memo') or 'Manual journal', data.get('debit_account'), data.get('credit_account'), amount, data.get('currency') or 'USD', ts))
+                         (tenant_id, 'manual', None, data.get('entry_date') or ts[:10], data.get('memo') or 'Manual journal', data.get('debit_account'), data.get('credit_account'), amount, data.get('currency') or self._tenant_currency(conn, tenant_id) or 'USD', ts))
             log_audit(conn, tenant_id, user_id, 'create', 'journal', None, {'amount': amount})
         return self._json({'ok': True})
 
@@ -5035,7 +5101,7 @@ class Handler(BaseHTTPRequestHandler):
             conn.execute("""INSERT INTO pss_payments(tenant_id,payment_no,booking_id,pnr,channel_id,amount,currency,method,reference,gateway_ref,status,paid_at,captured_at,notes,created_by,created_at,updated_at,booking_source)
                             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                          (tenant_id, payment_no, bid, row.get('pnr'), row.get('channel_id') or data.get('channel_id'), amount,
-                          data.get('currency') or row.get('currency') or 'USD', data.get('method') or 'cash',
+                          data.get('currency') or row.get('currency') or self._tenant_currency(conn, tenant_id) or 'USD', data.get('method') or 'cash',
                           data.get('reference'), data.get('gateway_ref'), status, paid_at,
                           now_iso() if status in ('captured','paid') else None, data.get('notes'), user_id, now_iso(), now_iso(), 'counter'))
             ppid = q(conn, "SELECT last_insert_rowid() v", (), one=True)['v']
@@ -5200,7 +5266,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_pss_payments(self, tenant_id, sess=None):
         with db() as conn:
-            sql = """SELECT p.*, c.name channel_name FROM pss_payments p LEFT JOIN pss_channels c ON c.id=p.channel_id
+            sql = """SELECT p.*, c.name channel_name, b.passenger_name, b.ticket_number, b.booking_status, b.payment_status booking_payment_status
+                     FROM pss_payments p
+                     LEFT JOIN pss_channels c ON c.id=p.channel_id
+                     LEFT JOIN pss_bookings b ON b.id=p.booking_id AND b.tenant_id=p.tenant_id
                      WHERE p.tenant_id=?"""
             args = [tenant_id]
             aid = (sess or {}).get('agency_id')
@@ -5210,6 +5279,47 @@ class Handler(BaseHTTPRequestHandler):
             sql += " ORDER BY p.id DESC LIMIT 500"
             rows = q(conn, sql, args)
         return self._json({'payments': rows})
+
+    def api_pss_payment_create(self, tenant_id, user_id, sess=None):
+        data = read_json(self)
+        bid = self._oid(data.get('booking_id'))
+        pnr = (data.get('pnr') or '').strip().upper()
+        amount = float(data.get('amount') or 0)
+        if amount <= 0:
+            return self._json({'error': 'amount required'}, 400)
+        with db() as conn:
+            if bid:
+                row = q(conn, "SELECT * FROM pss_bookings WHERE id=? AND tenant_id=?", (bid, tenant_id), one=True)
+            elif pnr:
+                row = q(conn, "SELECT * FROM pss_bookings WHERE tenant_id=? AND pnr=? ORDER BY id DESC LIMIT 1", (tenant_id, pnr), one=True)
+            else:
+                return self._json({'error': 'booking_id or pnr required'}, 400)
+            if not row or ((sess or {}).get('agency_id') and row.get('agency_id') != sess.get('agency_id')):
+                return self._json({'error': 'Booking not found'}, 404)
+            bid = row['id']
+            payment_no = self._psn('PAY')
+            status = data.get('status') or 'captured'
+            paid_at = data.get('paid_at') or now_iso()
+            currency = (data.get('currency') or row.get('currency') or self._wallet_currency(conn, tenant_id) or 'USD').upper()
+            conn.execute("""INSERT INTO pss_payments(tenant_id,payment_no,booking_id,pnr,channel_id,amount,currency,method,reference,gateway_ref,status,paid_at,captured_at,notes,created_by,created_at,updated_at,booking_source)
+                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                         (tenant_id, payment_no, bid, row.get('pnr'), row.get('channel_id') or data.get('channel_id'), amount,
+                          currency, data.get('method') or 'cash',
+                          data.get('reference'), data.get('gateway_ref'), status, paid_at,
+                          now_iso() if status in ('captured','paid') else None, data.get('notes'), user_id, now_iso(), now_iso(), data.get('booking_source') or 'counter'))
+            ppid = q(conn, "SELECT last_insert_rowid() v", (), one=True)['v']
+            paid_total = (q(conn, "SELECT COALESCE(SUM(amount),0) v FROM pss_payments WHERE booking_id=? AND tenant_id=? AND status IN ('captured','paid')", (bid, tenant_id), one=True) or {}).get('v', 0)
+            pay_status = 'paid' if paid_total >= float(row.get('total_amount') or 0) else ('partial' if paid_total > 0 else 'pending')
+            conn.execute("UPDATE pss_bookings SET payment_status=?, updated_at=? WHERE id=? AND tenant_id=?", (pay_status, now_iso(), bid, tenant_id))
+            self._activity(conn, tenant_id, 'pss_booking', bid, 'payment_recorded', payment_no, user_id)
+            self._trace(conn, tenant_id, 'counter', 'pss_booking', bid, 'payment_recorded', user_id, f"{payment_no} - {amount}", row.get('trace_id'), self)
+            try:
+                self._erp_sync_pss_booking(conn, tenant_id, bid, actor=user_id or 'counter', source='counter')
+                self._erp_sync_pss_payment(conn, tenant_id, ppid, actor=user_id or 'counter', source='counter')
+            except Exception:
+                pass
+            log_audit(conn, tenant_id, user_id, 'payment', 'pss_booking', bid, {'payment_no': payment_no, 'amount': amount})
+        return self._json({'ok': True, 'payment_no': payment_no, 'payment_status': pay_status, 'booking_id': bid})
 
     def api_pss_payment_mutate(self, tenant_id, pid, method):
         pid = self._oid(pid)
@@ -5234,43 +5344,247 @@ class Handler(BaseHTTPRequestHandler):
             updated = q(conn, "SELECT * FROM pss_payments WHERE id=? AND tenant_id=?", (pid, tenant_id), one=True)
         return self._json({'ok': True, 'payment': updated})
 
-    def api_pss_stock(self, tenant_id):
+    def _tenant_currency(self, conn, tenant_id):
+        row = q(conn, "SELECT settings_json FROM tenants WHERE id=?", (tenant_id,), one=True) or {}
+        try:
+            settings = json.loads(row.get('settings_json') or '{}')
+        except Exception:
+            settings = {}
+        cur = (settings.get('default_currency') or settings.get('currency') or '').strip().upper()
+        if cur:
+            return cur
+        ap = q(conn, "SELECT default_currency FROM agency_profile WHERE tenant_id=?", (tenant_id,), one=True) or {}
+        cur = (ap.get('default_currency') or '').strip().upper()
+        if cur:
+            return cur
+        br = q(conn, "SELECT currency FROM tenant_branding WHERE tenant_id=?", (tenant_id,), one=True) if False else {}
+        return 'USD'
+
+    def _wallet_currency(self, conn, tenant_id):
+        return self._tenant_currency(conn, tenant_id)
+
+    def _ensure_agency_wallet(self, conn, tenant_id, agency_id, currency=None):
+        agency_id = self._oid(agency_id)
+        if not agency_id:
+            return None
+        cur = (currency or self._wallet_currency(conn, tenant_id) or 'USD').upper()
+        ts = now_iso()
+        conn.execute("""INSERT OR IGNORE INTO pss_agency_wallets(tenant_id,agency_id,currency,balance,status,created_at,updated_at)
+                        VALUES (?,?,?,0,'active',?,?)""", (tenant_id, agency_id, cur, ts, ts))
+        return q(conn, "SELECT * FROM pss_agency_wallets WHERE tenant_id=? AND agency_id=? AND currency=?",
+                 (tenant_id, agency_id, cur), one=True)
+
+    def _wallet_summary(self, conn, tenant_id, agency_id=None):
+        where = "WHERE w.tenant_id=?"
+        args = [tenant_id]
+        if agency_id:
+            where += " AND w.agency_id=?"; args.append(self._oid(agency_id))
+        return q(conn, f"""SELECT w.*, a.code agency_code, a.name agency_name,
+                                  (SELECT COUNT(*) FROM pss_stock_allocations al WHERE al.tenant_id=w.tenant_id AND al.agency_id=w.agency_id) allocations,
+                                  (SELECT COALESCE(SUM(al.total_amount),0) FROM pss_stock_allocations al WHERE al.tenant_id=w.tenant_id AND al.agency_id=w.agency_id) allocated_amount
+                           FROM pss_agency_wallets w
+                           LEFT JOIN pss_agencies a ON a.id=w.agency_id AND a.tenant_id=w.tenant_id
+                           {where} ORDER BY a.name, w.id""", args)
+
+    def _apply_wallet_topup(self, conn, tx_ref, gateway_data=None):
+        tx = q(conn, "SELECT * FROM pss_wallet_transactions WHERE gateway_ref=? OR tx_no=?", (tx_ref, tx_ref), one=True)
+        if not tx or tx.get('status') in ('captured', 'paid', 'applied'):
+            return False
+        wallet = self._ensure_agency_wallet(conn, tx['tenant_id'], tx['agency_id'], tx.get('currency'))
+        before = float((wallet or {}).get('balance') or 0)
+        amount = float(tx.get('amount') or 0)
+        after = round(before + amount, 2)
+        ts = now_iso()
+        conn.execute("UPDATE pss_agency_wallets SET balance=?, updated_at=? WHERE id=?", (after, ts, wallet['id']))
+        conn.execute("""UPDATE pss_wallet_transactions SET status='captured', balance_before=?, balance_after=?, raw_json=?, updated_at=?
+                        WHERE id=?""", (before, after, json.dumps(gateway_data or {}, default=str), ts, tx['id']))
+        self._trace(conn, tx['tenant_id'], 'flutterwave', 'pss_agency_wallet', tx['agency_id'], 'wallet_topup_captured',
+                    str(tx.get('created_by') or 'flutterwave'), tx_ref, None, self)
+        return True
+
+    def api_pss_stock(self, tenant_id, sess=None):
         with db() as conn:
             pools = q(conn, "SELECT * FROM pss_stock_pools WHERE tenant_id=? ORDER BY id DESC", (tenant_id,))
             for p in pools:
                 p['remaining'] = int(p.get('end_serial') or 0) - int(p.get('next_serial') or 0) + 1
-            allocs = q(conn, """SELECT a.*, p.prefix FROM pss_stock_allocations a JOIN pss_stock_pools p ON p.id=a.pool_id
-                               WHERE a.tenant_id=? ORDER BY a.id DESC LIMIT 300""", (tenant_id,))
+            agency_id = (sess or {}).get('agency_id')
+            alloc_sql = """SELECT a.*, p.prefix, ag.name agency_name, ag.code agency_code
+                               FROM pss_stock_allocations a
+                               JOIN pss_stock_pools p ON p.id=a.pool_id
+                               LEFT JOIN pss_agencies ag ON ag.id=a.agency_id AND ag.tenant_id=a.tenant_id
+                               WHERE a.tenant_id=?"""
+            alloc_args = [tenant_id]
+            if agency_id:
+                alloc_sql += " AND a.agency_id=?"; alloc_args.append(agency_id)
+            alloc_sql += " ORDER BY a.id DESC LIMIT 300"
+            allocs = q(conn, alloc_sql, tuple(alloc_args))
             for a in allocs:
                 a['remaining'] = int(a.get('end_serial') or 0) - int(a.get('next_serial') or 0) + 1
-        return self._json({'pools': pools, 'allocations': allocs})
+            wallets = self._wallet_summary(conn, tenant_id, agency_id=agency_id)
+            tx_where = "WHERE t.tenant_id=?"
+            tx_args = [tenant_id]
+            if agency_id:
+                tx_where += " AND t.agency_id=?"; tx_args.append(agency_id)
+            txs = q(conn, f"""SELECT t.*, a.name agency_name FROM pss_wallet_transactions t
+                              LEFT JOIN pss_agencies a ON a.id=t.agency_id AND a.tenant_id=t.tenant_id
+                              {tx_where} ORDER BY t.id DESC LIMIT 100""", tx_args)
+        return self._json({'pools': pools, 'allocations': allocs, 'wallets': wallets, 'wallet_transactions': txs})
 
-    def api_pss_allocations(self, tenant_id):
-        return self.api_pss_stock(tenant_id)
+    def api_pss_allocations(self, tenant_id, sess=None):
+        return self.api_pss_stock(tenant_id, sess=sess)
 
-    def api_pss_stock_allocate(self, tenant_id, user_id):
+    def api_pss_wallets(self, tenant_id, sess=None):
+        agency_id = (sess or {}).get('agency_id')
+        with db() as conn:
+            wallets = self._wallet_summary(conn, tenant_id, agency_id=agency_id)
+            for w in wallets:
+                w['recent_transactions'] = q(conn, """SELECT * FROM pss_wallet_transactions
+                                                      WHERE tenant_id=? AND agency_id=? AND currency=?
+                                                      ORDER BY id DESC LIMIT 10""",
+                                             (tenant_id, w['agency_id'], w.get('currency') or 'USD'))
+        return self._json({'wallets': wallets})
+
+    def api_pss_wallet_transactions(self, tenant_id, qs, sess=None):
+        agency_id = (sess or {}).get('agency_id') or self._oid((qs.get('agency_id') or [''])[0])
+        with db() as conn:
+            where = "WHERE t.tenant_id=?"
+            args = [tenant_id]
+            if agency_id:
+                where += " AND t.agency_id=?"; args.append(agency_id)
+            rows = q(conn, f"""SELECT t.*, a.name agency_name, a.code agency_code
+                               FROM pss_wallet_transactions t
+                               LEFT JOIN pss_agencies a ON a.id=t.agency_id AND a.tenant_id=t.tenant_id
+                               {where} ORDER BY t.id DESC LIMIT 300""", args)
+        return self._json({'transactions': rows})
+
+    def api_pss_wallet_topup_init(self, tenant_id, user_id, sess=None):
+        data = read_json(self)
+        agency_id = self._oid((sess or {}).get('agency_id') or data.get('agency_id'))
+        amount = float(data.get('amount') or 0)
+        if not agency_id or amount <= 0:
+            return self._json({'error': 'agency_id and positive amount required'}, 400)
+        with db() as conn:
+            agency = q(conn, "SELECT * FROM pss_agencies WHERE id=? AND tenant_id=?", (agency_id, tenant_id), one=True)
+            if not agency:
+                return self._json({'error': 'Agency not found'}, 404)
+            currency = (data.get('currency') or self._wallet_currency(conn, tenant_id) or 'USD').upper()
+            wallet = self._ensure_agency_wallet(conn, tenant_id, agency_id, currency)
+            gw = self._pss_flw_gateway(conn, tenant_id)
+            secret = (gw or {}).get('secret_key') or ''
+            tx_ref = 'WTX-' + os.urandom(6).hex().upper()
+            ts = now_iso()
+            notes = f"Agency wallet top-up {agency.get('name')}" + (' DEMO' if not secret else '')
+            conn.execute("""INSERT INTO pss_wallet_transactions
+                (tenant_id,agency_id,wallet_id,tx_no,tx_type,direction,amount,currency,balance_before,balance_after,reference,gateway_ref,status,method,notes,created_by,created_at,updated_at)
+                VALUES (?,?,?,?,?,'credit',?,?,?,?,'wallet_topup',?,'pending','flutterwave',?,?,?,?)""",
+                (tenant_id, agency_id, wallet['id'], tx_ref, 'wallet_topup', amount, currency, float(wallet.get('balance') or 0), float(wallet.get('balance') or 0),
+                 tx_ref, notes, user_id, ts, ts))
+            if not secret:
+                return self._json({'ok': True, 'demo': True, 'tx_ref': tx_ref, 'amount': amount, 'currency': currency,
+                                   'url': f'/api/pss/wallets/topup/verify?tx_ref={tx_ref}&status=successful'})
+            cfg = gw.get('config') or {}
+            redirect = data.get('redirect_url') or f"{cfg.get('site_url','')}/index.html#agency-wallet"
+            payload = {'tx_ref': tx_ref, 'amount': amount, 'currency': currency,
+                       'email': data.get('email') or agency.get('contact_email') or 'agency@fayaka.aero',
+                       'phonenumber': data.get('phone') or agency.get('contact_phone') or '',
+                       'name': agency.get('name') or 'Agency',
+                       'payment_options': cfg.get('methods', 'mobilemoney,card,banktransfer,ussd'),
+                       'redirect_url': redirect,
+                       'meta': {'source': 'agency_wallet_topup', 'agency_id': agency_id, 'tenant_id': tenant_id, 'tx_ref': tx_ref},
+                       'customizations': {'title': 'Fayaka Airline', 'description': f'Agency wallet top-up {agency.get("code") or agency_id}'}}
+            status, resp = flutterwave_request('POST', '/payments', secret, payload)
+            link = (resp or {}).get('data', {}).get('link') if status in (200, 201) else None
+            if not link:
+                conn.execute("UPDATE pss_wallet_transactions SET status='failed', raw_json=?, updated_at=? WHERE tenant_id=? AND tx_no=?",
+                             (json.dumps(resp or {}, default=str), now_iso(), tenant_id, tx_ref))
+                return self._json({'error': (resp or {}).get('message') or 'Flutterwave init failed'}, 502)
+            conn.execute("UPDATE pss_wallet_transactions SET raw_json=?, updated_at=? WHERE tenant_id=? AND tx_no=?",
+                         (json.dumps(resp or {}, default=str), now_iso(), tenant_id, tx_ref))
+        return self._json({'ok': True, 'tx_ref': tx_ref, 'url': link, 'amount': amount, 'currency': currency})
+
+    def api_pss_wallet_topup_verify(self, tenant_id, qs, sess=None):
+        tx_ref = (qs.get('tx_ref') or [''])[0]
+        status = (qs.get('status') or ['successful'])[0]
+        if not tx_ref:
+            return self._json({'error': 'tx_ref required'}, 400)
+        with db() as conn:
+            tx = q(conn, "SELECT * FROM pss_wallet_transactions WHERE tenant_id=? AND (tx_no=? OR gateway_ref=?)", (tenant_id, tx_ref, tx_ref), one=True)
+            if not tx:
+                return self._json({'error': 'Wallet transaction not found'}, 404)
+            gw = self._pss_flw_gateway(conn, tenant_id)
+            secret = (gw or {}).get('secret_key') or ''
+            verified = False
+            gateway_data = {'tx_ref': tx_ref, 'status': status}
+            if secret:
+                vstatus, vresp = flutterwave_verify(secret, tx_ref=tx_ref)
+                vdata = (vresp or {}).get('data') or {}
+                verified = vstatus == 200 and str(vdata.get('status') or '').lower() == 'successful'
+                verified = verified and float(vdata.get('amount') or 0) >= float(tx.get('amount') or 0)
+                verified = verified and str(vdata.get('currency') or '').upper() == str(tx.get('currency') or '').upper()
+                gateway_data = vresp or gateway_data
+            else:
+                verified = 'DEMO' in str(tx.get('notes') or '') and status.lower() in ('successful', 'success')
+            if verified:
+                self._apply_wallet_topup(conn, tx_ref, gateway_data)
+            wallet_balance = None
+            if tx.get('wallet_id'):
+                wrow = q(conn, "SELECT balance FROM pss_agency_wallets WHERE id=?", (tx.get('wallet_id'),), one=True)
+                wallet_balance = float((wrow or {}).get('balance') or 0)
+        return self._json({'ok': True, 'verified': bool(verified), 'tx_ref': tx_ref, 'wallet_balance': wallet_balance})
+
+    def api_pss_stock_allocate(self, tenant_id, user_id, sess=None):
         data = read_json(self)
         pid = self._oid(data.get('pool_id'))
         qty = int(data.get('quantity') or 0)
         if qty <= 0:
             return self._json({'error': 'quantity required'}, 400)
+        agency_id = self._oid((sess or {}).get('agency_id') or data.get('agency_id'))
+        unit_price = float(data.get('unit_price') or 0)
+        if unit_price < 0:
+            return self._json({'error': 'unit_price must be >= 0'}, 400)
         with db() as conn:
             pool = q(conn, "SELECT * FROM pss_stock_pools WHERE id=? AND tenant_id=?", (pid, tenant_id), one=True)
             if not pool:
                 return self._json({'error': 'Stock pool not found'}, 404)
+            agency = q(conn, "SELECT * FROM pss_agencies WHERE id=? AND tenant_id=?", (agency_id, tenant_id), one=True) if agency_id else None
+            if agency_id and not agency:
+                return self._json({'error': 'Agency not found'}, 404)
             start = int(pool.get('next_serial') or pool.get('start_serial'))
             end = start + qty - 1
             if end > int(pool.get('end_serial')):
                 return self._json({'error': 'Not enough stock in pool'}, 400)
+            currency = (data.get('currency') or self._wallet_currency(conn, tenant_id) or 'USD').upper()
+            total_amount = round(qty * unit_price, 2)
+            wallet_tx_id = None
+            if agency and total_amount > 0:
+                wallet = self._ensure_agency_wallet(conn, tenant_id, agency['id'], currency)
+                balance = float((wallet or {}).get('balance') or 0)
+                if balance < total_amount:
+                    return self._json({'error': 'Insufficient wallet credit', 'balance': balance, 'required': total_amount, 'currency': currency}, 402)
+                after = round(balance - total_amount, 2)
+                tx_no = self._psn('WTX')
+                ts = now_iso()
+                cur = conn.execute("""INSERT INTO pss_wallet_transactions
+                    (tenant_id,agency_id,wallet_id,tx_no,tx_type,direction,amount,currency,balance_before,balance_after,reference,gateway_ref,status,method,notes,created_by,created_at,updated_at)
+                    VALUES (?,?,?,?,?,'debit',?,?,?,?,?,?,'captured','wallet',?,?,?)""",
+                    (tenant_id, agency['id'], wallet['id'], tx_no, 'stock_allocation', total_amount, currency, balance, after,
+                     f"ALLOC-{pid}", None, f"Stock allocation from pool {pool.get('pool_no')}", user_id, ts, ts))
+                wallet_tx_id = int(cur.lastrowid)
+                conn.execute("UPDATE pss_agency_wallets SET balance=?, updated_at=? WHERE id=?", (after, ts, wallet['id']))
             alloc_no = self._psn('AL')
-            conn.execute("""INSERT INTO pss_stock_allocations(tenant_id,allocation_no,pool_id,channel_id,airport_code,quantity,start_serial,end_serial,next_serial,allocated_to,status,created_at,updated_at)
-                            VALUES (?,?,?,?,?,?,?,?,?,?,'active',?,?)""",
-                         (tenant_id, alloc_no, pid, self._oid(data.get('channel_id')), data.get('airport_code'),
-                          qty, start, end, start, data.get('allocated_to'), now_iso(), now_iso()))
+            allocated_to = data.get('allocated_to') or (agency.get('name') if agency else None)
+            cur = conn.execute("""INSERT INTO pss_stock_allocations
+                (tenant_id,allocation_no,pool_id,channel_id,airport_code,quantity,start_serial,end_serial,next_serial,allocated_to,agency_id,unit_price,total_amount,currency,wallet_tx_id,status,created_at,updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'active',?,?)""",
+                (tenant_id, alloc_no, pid, self._oid(data.get('channel_id')), data.get('airport_code'),
+                 qty, start, end, start, allocated_to, agency['id'] if agency else None, unit_price, total_amount, currency, wallet_tx_id, now_iso(), now_iso()))
+            allocation_id = int(cur.lastrowid)
+            if wallet_tx_id:
+                conn.execute("UPDATE pss_wallet_transactions SET allocation_id=?, reference=? WHERE id=?", (allocation_id, alloc_no, wallet_tx_id))
             conn.execute("UPDATE pss_stock_pools SET next_serial=?, updated_at=? WHERE id=? AND tenant_id=?", (end + 1, now_iso(), pid, tenant_id))
-            self._trace(conn, tenant_id, 'counter', 'pss_stock_allocation', None, 'stock_allocated', user_id, alloc_no, None, self)
-            log_audit(conn, tenant_id, user_id, 'allocate_stock', 'pss_stock_pool', pid, {'quantity': qty, 'allocation_no': alloc_no})
-        return self._json({'ok': True, 'allocation_no': alloc_no, 'start_serial': start, 'end_serial': end})
+            self._trace(conn, tenant_id, 'counter', 'pss_stock_allocation', allocation_id, 'stock_allocated', user_id, alloc_no, None, self)
+            log_audit(conn, tenant_id, user_id, 'allocate_stock', 'pss_stock_pool', pid, {'quantity': qty, 'allocation_no': alloc_no, 'agency_id': agency['id'] if agency else None, 'total_amount': total_amount})
+        return self._json({'ok': True, 'allocation_id': allocation_id, 'allocation_no': alloc_no, 'start_serial': start, 'end_serial': end, 'total_amount': total_amount, 'currency': currency})
 
     def api_pss_stock_issue(self, tenant_id, user_id):
         data = read_json(self)
@@ -5414,7 +5728,7 @@ class Handler(BaseHTTPRequestHandler):
                          (tenant_id, None, 'pss_booking', src, None, None, pnr, pnr, b.get('airport_code'), None, cid, b.get('created_by'),
                           'Flight', b.get('booking_status') or 'booked', b.get('ticket_status') or 'unissued', None,
                           (b.get('created_at') or ts)[:10], b.get('flight_date'), b.get('flight_date'),
-                          b.get('origin'), b.get('destination'), b.get('currency') or 'USD',
+                          b.get('origin'), b.get('destination'), b.get('currency') or self._tenant_currency(conn, tenant_id) or 'USD',
                           total, 0, total, total, f"PSS booking {pnr}", ts, ts, agency_id, bid, source, b.get('trace_id')))
             oid = q(conn, "SELECT last_insert_rowid() v", (), one=True)['v']
         else:
@@ -5423,7 +5737,7 @@ class Handler(BaseHTTPRequestHandler):
                             booking_date=COALESCE(?,booking_date), travel_start=?, travel_end=?, updated_at=?,
                             agency_id=COALESCE(?,agency_id), booking_source=?, trace_id=?, ticket_status=?
                             WHERE id=? AND tenant_id=?""",
-                         (cid, pnr, b.get('origin'), b.get('destination'), b.get('currency') or 'USD', total, total, total,
+                         (cid, pnr, b.get('origin'), b.get('destination'), b.get('currency') or self._tenant_currency(conn, tenant_id) or 'USD', total, total, total,
                           (b.get('created_at') or ts)[:10], b.get('flight_date'), b.get('flight_date'), ts,
                           agency_id, source, b.get('trace_id'), b.get('ticket_status') or 'unissued', oid, tenant_id))
         # invoice
@@ -5438,7 +5752,7 @@ class Handler(BaseHTTPRequestHandler):
         fare = round(sum(float(r.get('fare_amount') or 0) for r in trip_rows), 2)
         taxes = round(sum(float(r.get('taxes') or 0) for r in trip_rows), 2)
         flight_total = round(sum(float(r.get('total_amount') or 0) for r in trip_rows), 2)
-        cur = b.get('currency') or 'USD'
+        cur = b.get('currency') or self._tenant_currency(conn, tenant_id) or 'USD'
         anc_rows = q(conn, f"""SELECT id,description,quantity,unit_price,amount FROM pss_ancillary_sales
                                WHERE tenant_id=? AND booking_id IN ({trip_marks}) AND LOWER(COALESCE(status,'sold'))<>'void'""",
                      [tenant_id] + trip_ids)
@@ -5613,7 +5927,8 @@ class Handler(BaseHTTPRequestHandler):
                 'logo_data': branding.get('logo_data') or '',
                 'logo_text': branding.get('logo_text') or name[:3].upper(),
                 'primary_color': branding.get('primary_color') or '#0f2742',
-                'accent_color': branding.get('accent_color') or '#f59e0b'
+                'accent_color': branding.get('accent_color') or '#f59e0b',
+                'currency': branding.get('currency') or self._tenant_currency(conn, tenant['id'])
             }
         })
 
@@ -5886,7 +6201,7 @@ class Handler(BaseHTTPRequestHandler):
                          (tenant['id'], request_no, data.get('client_name'), data.get('email'), data.get('phone'),
                           data.get('origin'), data.get('destination'), data.get('flight_date'),
                           data.get('pax_count'), data.get('aircraft_type'), data.get('requirements'),
-                          data.get('currency') or 'USD', now_iso(), now_iso()))
+                          data.get('currency') or self._tenant_currency(conn, tenant_id) or 'USD', now_iso(), now_iso()))
             rid = q(conn, "SELECT last_insert_rowid() v", (), one=True)['v']
             self._trace(conn, tenant['id'], 'portal', 'pss_charter_request', rid, 'charter_requested',
                         data.get('client_name'), f"{request_no} · {data.get('origin')}-{data.get('destination')}", trace_id, self)
@@ -6284,7 +6599,7 @@ class Handler(BaseHTTPRequestHandler):
             conn.execute("""INSERT INTO pss_eticket_directs(tenant_id,offer_no,agency_id,flight_id,fare_amount,taxes,currency,quantity,used_count,valid_until,status,token,notes,created_by,created_at,updated_at)
                             VALUES (?,?,?,?,?,?,?,?,0,?,?,?,?,?,?,?)""",
                          (tenant_id, offer_no, agency, flight, float(data.get('fare_amount') or 0), float(data.get('taxes') or 0),
-                          data.get('currency') or 'USD', int(data.get('quantity') or 1), data.get('valid_until'),
+                          data.get('currency') or self._tenant_currency(conn, tenant_id) or 'USD', int(data.get('quantity') or 1), data.get('valid_until'),
                           data.get('status') or 'active', token, data.get('notes'), user_id, now_iso(), now_iso()))
             did = q(conn, "SELECT last_insert_rowid() v", (), one=True)['v']
             self._trace(conn, tenant_id, 'counter', 'pss_eticket_direct', did, 'offer_created', user_id, offer_no, None, self)
@@ -6316,7 +6631,7 @@ class Handler(BaseHTTPRequestHandler):
                             VALUES (?,?,?,?,?,?,?,?,?,?,?,'new',0,?,?,?,?,?,?)""",
                          (tenant_id, request_no, data.get('client_name'), data.get('contact_email'), data.get('contact_phone'),
                           data.get('origin'), data.get('destination'), data.get('flight_date'), data.get('pax_count'),
-                          data.get('aircraft_type'), data.get('requirements'), data.get('currency') or 'USD', data.get('assigned_to'),
+                          data.get('aircraft_type'), data.get('requirements'), data.get('currency') or self._tenant_currency(conn, tenant_id) or 'USD', data.get('assigned_to'),
                           data.get('notes'), user_id, now_iso(), now_iso()))
             rid = q(conn, "SELECT last_insert_rowid() v", (), one=True)['v']
             self._trace(conn, tenant_id, 'charter', 'pss_charter_request', rid, 'request_created', user_id, request_no, None, self)
@@ -6529,7 +6844,7 @@ class Handler(BaseHTTPRequestHandler):
             trace_id = b.get('trace_id') or self._new_trace_id()
             cur = conn.execute("""INSERT INTO pss_ancillary_sales(tenant_id,sale_no,booking_id,ancillary_id,description,quantity,unit_price,amount,currency,status,payment_status,trace_id,created_by,created_at,updated_at)
                             VALUES (?,?,?,NULL,?,1,?,?,?,'sold',?,?,?,?,?)""",
-                         (tenant_id, sale_no, bid, desc, rate, charge, b.get('currency') or 'USD',
+                         (tenant_id, sale_no, bid, desc, rate, charge, b.get('currency') or self._tenant_currency(conn, tenant_id) or 'USD',
                           data.get('payment_status') or 'pending', trace_id, user_id, now_iso(), now_iso()))
             sid = cur.lastrowid
             self._trace(conn, tenant_id, 'counter', 'pss_ancillary_sale', sid, 'baggage_allocated', user_id,
@@ -6779,11 +7094,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({'error': 'Unknown airline portal'}, 404)
         email = (data.get('email') or '').strip().lower()
         password = data.get('password') or ''
-        ip = self.client_address[0] if self.client_address else 'unknown'
-        key = 'portal:' + hashlib.sha256(str(ip).encode()).hexdigest()[:16]
+        key = _login_ident(self, 'portal', f"{tenant['code']}|{email}")
         locked_until = _login_locked_until(key)
         if locked_until and locked_until > time.time():
-            return self._json({'error': 'Too many failed attempts. Try again later.'}, 401)
+            retry = max(1, int(locked_until - time.time()))
+            return self._json({'error': 'Too many failed attempts. Try again later.', 'retry_after': retry},
+                              401, headers={'Retry-After': str(retry)})
         with db() as conn:
             c = q(conn, "SELECT * FROM portal_customers WHERE tenant_id=? AND email=? AND status='active'",
                   (tenant['id'], email), one=True)
@@ -7106,13 +7422,13 @@ class Handler(BaseHTTPRequestHandler):
             conn.execute("""INSERT INTO pss_payments(tenant_id,payment_no,booking_id,pnr,channel_id,amount,currency,method,reference,gateway_ref,status,notes,booking_source,created_at,updated_at)
                             VALUES (?,?,?,?,?,?,?,'flutterwave',?,?,'pending',?,'agency_direct',?,?)""",
                          (tenant_id, tx_ref, bid, b['pnr'], b.get('channel_id'), amount,
-                          data.get('currency') or b.get('currency') or 'USD', data.get('reference'), tx_ref,
+                          data.get('currency') or b.get('currency') or self._tenant_currency(conn, tenant_id) or 'USD', data.get('reference'), tx_ref,
                           ('DEMO' if not secret else ''), now_iso(), now_iso()))
             if not secret:
                 return self._json({'ok': True, 'demo': True, 'tx_ref': tx_ref,
                                    'url': f'/api/pss/payments/flutterwave/verify?tx_ref={tx_ref}&status=successful'})
             channel = q(conn, "SELECT name FROM pss_channels WHERE id=?", (b.get('channel_id'),), one=True) if b.get('channel_id') else None
-            payload = {'tx_ref': tx_ref, 'amount': amount, 'currency': data.get('currency') or b.get('currency') or 'USD',
+            payload = {'tx_ref': tx_ref, 'amount': amount, 'currency': data.get('currency') or b.get('currency') or self._tenant_currency(conn, tenant_id) or 'USD',
                        'email': data.get('email') or b.get('contact_email') or 'agency@fayaka.aero',
                        'phonenumber': data.get('phone') or b.get('contact_phone') or '',
                        'name': b.get('passenger_name') or 'Fayaka passenger',
@@ -7143,7 +7459,7 @@ class Handler(BaseHTTPRequestHandler):
                 conn.execute("""INSERT INTO pss_tax_lines(tenant_id,booking_id,tax_code,description,amount,currency,created_at)
                                 VALUES (?,?,?,?,?,?,?)""",
                              (tenant_id, bid, item.get('tax_code') or 'OTH', item.get('description'),
-                              float(item.get('amount') or 0), item.get('currency') or b.get('currency') or 'USD', now_iso()))
+                              float(item.get('amount') or 0), item.get('currency') or b.get('currency') or self._tenant_currency(conn, tenant_id) or 'USD', now_iso()))
             self._doc_audit(conn, tenant_id, 'financials', b.get('pnr'), bid, b.get('pnr'),
                             'financials_updated', user_id, b.get('trace_id'), data)
         return self._json({'ok': True})
@@ -7255,7 +7571,7 @@ class PartnerAPIHandler(Handler):
             return self._json({'error': 'passenger_count must be a number'}, 422)
         if not flights:
             return self._json({'error': 'At least one flight is required'}, 422)
-        currency = str(data.get('currency') or 'USD').upper()
+        currency = str(data.get('currency') or self._tenant_currency(conn, tenant_id) or 'USD').upper()
         pos = str(data.get('pos') or 'DIRECT').upper()
         channel = str(data.get('channel') or 'api')
         try:

@@ -369,8 +369,8 @@ pre { white-space: pre-wrap; word-break: break-word; background: #f7f9fc; border
 .checkin-line b { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .checkin-meta { color: var(--muted); font-size: 11px; line-height: 1.45; letter-spacing: .2px; }
 .checkin-route { font-size: 12px; font-weight: 700; color: var(--ink); }
-.checkin-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
-.checkin-chips span { padding: 4px 9px; border: 1px solid var(--line); border-radius: 999px; background: var(--soft-2); color: var(--muted); font-size: 10px; font-weight: 600; }
+.checkin-chips { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
+.checkin-chips span { padding: 2px 7px; border: 1px solid var(--line); border-radius: 999px; background: var(--soft-2); color: var(--muted); font-size: 9px; font-weight: 600; white-space: nowrap; max-width: 110px; overflow: hidden; text-overflow: ellipsis; }
 .checkin-actions { flex: 0 0 auto; margin-left: 2px; }
 .checkin-actions .action-menu { top: 32px; min-width: 180px; }
 .pdf-viewer-modal .modal-card { width: min(1080px, 96vw); height: min(88vh, 900px); max-height: none; overflow: hidden; padding: 0; display: flex; flex-direction: column; }
@@ -445,8 +445,8 @@ pre { white-space: pre-wrap; word-break: break-word; background: #f7f9fc; border
 .record-top { display: flex; align-items: center; gap: 9px; min-width: 0; }
 .record-top b { font-size: 13px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .record-sub { margin-top: 3px; color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.record-chips { display: flex; align-items: center; gap: 6px; margin-top: 5px; overflow: hidden; }
-.record-chips span { display: inline-flex; align-items: center; min-height: 19px; padding: 0 8px; border-radius: 999px; background: var(--soft-2); border: 1px solid var(--line); color: var(--muted); font-size: 10px; font-weight: 600; white-space: nowrap; }
+.record-chips { display: flex; align-items: center; gap: 4px; margin-top: 4px; overflow: hidden; flex-wrap: wrap; }
+.record-chips span { display: inline-flex; align-items: center; min-height: 18px; max-width: 120px; padding: 0 6px; border-radius: 999px; background: var(--soft-2); border: 1px solid var(--line); color: var(--muted); font-size: 9px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .record-amount { flex: 0 0 auto; text-align: right; color: var(--text); font-size: 13px; font-weight: 800; min-width: 92px; }
 .record-row .action-cell { flex: 0 0 auto; position: relative; }
 .record-row:nth-last-child(-n+2) .action-menu { top: auto; bottom: 34px; }
@@ -474,8 +474,8 @@ html[data-theme="dark"] .segmented { background: var(--soft); }
 .record-card-meta { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin: 10px 0 6px; }
 .record-card .record-amount { min-width: 0; text-align: right; font-size: 12px; }
 .record-card-details { min-height: 29px; color: var(--muted); font-size: 11px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.record-card .record-chips { margin-top: 8px; flex-wrap: wrap; }
-.record-card .record-chips span { font-size: 9px; padding: 0 6px; }
+.record-card .record-chips { margin-top: 6px; gap: 4px; flex-wrap: wrap; }
+.record-card .record-chips span { font-size: 9px; padding: 0 5px; max-width: 100px; }
 html[data-theme="dark"] .pager { background: linear-gradient(180deg, var(--panel-2), var(--soft)); }
 html[data-theme="dark"] .pager-buttons button { background: var(--panel); border-color: var(--line); color: var(--text); }
 html[data-theme="dark"] .pager-buttons button.active { background: var(--accent); border-color: var(--accent); color: #08111f; }

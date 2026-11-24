@@ -895,8 +895,8 @@ CREATE TABLE IF NOT EXISTS tenant_branding (
   tax_id TEXT,
   logo_text TEXT,
   logo_data TEXT,
-  primary_color TEXT DEFAULT '#0f2742',
-  accent_color TEXT DEFAULT '#0b6efd',
+  primary_color TEXT DEFAULT '#206090',
+  accent_color TEXT DEFAULT '#e02020',
   footer_note TEXT,
   updated_at TEXT NOT NULL,
   FOREIGN KEY(tenant_id) REFERENCES tenants(id)
@@ -1272,12 +1272,54 @@ CREATE TABLE IF NOT EXISTS pss_stock_allocations (
   end_serial INTEGER,
   next_serial INTEGER,
   allocated_to TEXT,
+  agency_id INTEGER,
+  unit_price REAL DEFAULT 0,
+  total_amount REAL DEFAULT 0,
+  currency TEXT DEFAULT 'USD',
+  wallet_tx_id INTEGER,
   status TEXT DEFAULT 'active',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(tenant_id, allocation_no),
   FOREIGN KEY(pool_id) REFERENCES pss_stock_pools(id),
   FOREIGN KEY(channel_id) REFERENCES pss_channels(id)
+);
+
+CREATE TABLE IF NOT EXISTS pss_agency_wallets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL,
+  agency_id INTEGER NOT NULL,
+  currency TEXT DEFAULT 'USD',
+  balance REAL DEFAULT 0,
+  status TEXT DEFAULT 'active',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(tenant_id, agency_id, currency)
+);
+
+CREATE TABLE IF NOT EXISTS pss_wallet_transactions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id INTEGER NOT NULL,
+  agency_id INTEGER NOT NULL,
+  wallet_id INTEGER,
+  tx_no TEXT NOT NULL,
+  tx_type TEXT NOT NULL,
+  direction TEXT NOT NULL,
+  amount REAL DEFAULT 0,
+  currency TEXT DEFAULT 'USD',
+  balance_before REAL DEFAULT 0,
+  balance_after REAL DEFAULT 0,
+  reference TEXT,
+  gateway_ref TEXT,
+  status TEXT DEFAULT 'pending',
+  method TEXT,
+  allocation_id INTEGER,
+  notes TEXT,
+  raw_json TEXT,
+  created_by INTEGER,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(tenant_id, tx_no)
 );
 CREATE TABLE IF NOT EXISTS pss_flights (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2370,8 +2412,8 @@ def ensure_accounting(conn):
       tax_id TEXT,
       logo_text TEXT,
       logo_data TEXT,
-      primary_color TEXT DEFAULT '#0f2742',
-      accent_color TEXT DEFAULT '#0b6efd',
+      primary_color TEXT DEFAULT '#206090',
+      accent_color TEXT DEFAULT '#e02020',
       footer_note TEXT,
       updated_at TEXT NOT NULL
     );
@@ -2545,11 +2587,15 @@ def ensure_pss(conn):
                            ('baggage_allowance_kg', 'REAL DEFAULT 23'), ('hold_expires_at', 'TEXT')]),
         ('pss_payments', [('trace_id', 'TEXT'), ('booking_source', "TEXT DEFAULT 'counter'")]),
         ('pss_flights', [('base_fare_reference', 'REAL'), ('fare_optimized_at', 'TEXT')]),
+        ('pss_stock_allocations', [('agency_id', 'INTEGER'), ('unit_price', 'REAL DEFAULT 0'), ('total_amount', 'REAL DEFAULT 0'),
+                                   ('currency', "TEXT DEFAULT 'USD'"), ('wallet_tx_id', 'INTEGER')]),
     ]:
         existing = {r['name'] for r in q(conn, f"PRAGMA table_info({table})")}
         for col, ddl in cols:
             if col not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pss_wallet_tx_agency ON pss_wallet_transactions(tenant_id, agency_id, id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pss_wallet_tx_ref ON pss_wallet_transactions(tenant_id, gateway_ref)")
 
 
 def seed_pss(conn):

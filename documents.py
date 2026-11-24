@@ -105,10 +105,9 @@ def _fit(text, font, size, max_w, c):
 
 
 def _brand(branding):
-    primary = _hex_color(branding.get('primary_color'), colors.HexColor('#0f2742'))
-    accent = _hex_color(branding.get('accent_color'), colors.HexColor('#0b6efd'))
-    tint = colors.HexColor('#eef4ff') if accent == colors.HexColor('#0b6efd') else colors.Color(
-        accent.red * 0.10 + 0.90, accent.green * 0.10 + 0.90, accent.blue * 0.10 + 0.90)
+    primary = _hex_color(branding.get('primary_color'), colors.HexColor('#206090'))
+    accent = _hex_color(branding.get('accent_color'), colors.HexColor('#e02020'))
+    tint = colors.Color(accent.red * 0.10 + 0.90, accent.green * 0.10 + 0.90, accent.blue * 0.10 + 0.90)
     ink = colors.HexColor('#132238')
     muted = colors.HexColor('#5b6b7f')
     return primary, accent, tint, ink, muted
@@ -1040,8 +1039,17 @@ def build_pdf(kind, context, branding):
                                    ('Service fee', _money(bk.get('service_fee'), cur), False),
                                    ('Commission', _money(bk.get('commission'), cur), False),
                                    ('Total', _money(bk.get('total_amount'), cur), True),
-                                   ('Payment', str(bk.get('payment_status') or '').title(), False)],
+                                   ('Payment status', str(bk.get('payment_status') or '').title(), False)],
                             branding, 'E-Ticket', subtitle)
+            payments = context.get('payments') or []
+            if payments:
+                pay_rows = [{'payment_no': p.get('payment_no'), 'paid_at': (p.get('paid_at') or p.get('created_at') or '')[:10],
+                             'method': str(p.get('method') or '').replace('_', ' ').title(),
+                             'amount': _money(p.get('amount'), p.get('currency') or cur),
+                             'status': str(p.get('status') or '').title()} for p in payments]
+                y = _section(c, y, 'Payments', pay_rows,
+                             [('payment_no', 0.22), ('paid_at', 0.18), ('method', 0.20), ('amount', 0.22), ('status', 0.18)],
+                             branding, 'E-Ticket', subtitle)
 
             y = _qr_panel(c, y, branding, 'E-ticket verification', qr_payload,
                           'Present this code at check-in or to your travel agency')
@@ -1056,12 +1064,22 @@ def build_pdf(kind, context, branding):
             ('PNR', bk.get('pnr')),
             ('E-ticket', bk.get('ticket_number')),
             ('Flight', bk.get('flight_no')),
-            ('Route', f"{bk.get('origin') or '-'} → {bk.get('destination') or '-'}"),
+            ('Route', f"{bk.get('origin') or '-'} �+' {bk.get('destination') or '-'}"),
             ('Date', bk.get('flight_date')),
             ('Departure / arrival', f"{bk.get('dep_time') or '-'} / {bk.get('arr_time') or '-'}"),
             ('Seat / class', f"{bk.get('seat_no') or '-'} / {bk.get('fare_class') or '-'}"),
-            ('Payment', str(bk.get('payment_status') or '').title()),
+            ('Payment status', str(bk.get('payment_status') or '').title()),
         ], branding, 'Travel Itinerary', subtitle)
+        payments = context.get('payments') or []
+        if payments:
+            cur = bk.get('currency') or branding.get('currency') or 'USD'
+            pay_rows = [{'payment_no': p.get('payment_no'), 'paid_at': (p.get('paid_at') or p.get('created_at') or '')[:10],
+                         'method': str(p.get('method') or '').replace('_', ' ').title(),
+                         'amount': _money(p.get('amount'), p.get('currency') or cur),
+                         'status': str(p.get('status') or '').title()} for p in payments]
+            y = _section(c, y, 'Payments', pay_rows,
+                         [('payment_no', 0.22), ('paid_at', 0.18), ('method', 0.20), ('amount', 0.22), ('status', 0.18)],
+                         branding, 'Travel Itinerary', subtitle)
         y = _section(c, y, 'Ancillary services', context.get('ancillaries') or [],
                      [('sale_no', 0.24), ('description', 0.42), ('quantity', 0.10), ('amount', 0.24)],
                      branding, 'Travel Itinerary', subtitle)

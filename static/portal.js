@@ -2,7 +2,8 @@ const parts = location.pathname.split('/').filter(Boolean);
 const tenantFromPath = parts[0] === 'portal' && parts[1] ? parts[1] : '';
 const esc = s => String(s ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 const js = v => esc(JSON.stringify(String(v ?? '')));
-const money = (n,c='USD') => (n===null||n===undefined)?'-':`${c} ${Number(n).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`;
+const defaultCurrency = ()=> portalBranding?.currency || searchData?.airline?.currency || 'USD';
+const money = (n,c) => { const cur = c || defaultCurrency(); return (n===null||n===undefined)?'-':`${cur} ${Number(n).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`; };
 function getCsrf(){ const m=document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/); return m?m[1]:''; }
 function toast(msg, type='ok'){
   let el = document.getElementById('portal-toast');
