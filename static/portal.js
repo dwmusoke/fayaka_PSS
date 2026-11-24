@@ -483,15 +483,15 @@ async function submitBooking(){
   const ancillaries = Array.from(document.querySelectorAll('.anc-check:checked')).map(x=>({ancillary_id:Number(x.value), quantity:1}));
   const seatSelections = Object.entries(selectedSeats).map(([fid,label])=>({flight_id:Number(fid), seat:label}));
   try{
+    const cur = searchData.segments[0]?.[selected[0]]?.currency || 'USD';
     const r = await api('/api/portal/book',{method:'POST',body:JSON.stringify({
       tenant:tenant(), trip_type:tripType, cabin:document.getElementById('f-cabin').value,
-      flights:flightIds, passengers, contact:{email:document.getElementById('bk-email').value.trim(), phone:document.getElementById('bk-phone').value.trim()}, ancillaries, seat_selections: seatSelections
+      flights:flightIds, passengers, contact:{email:document.getElementById('bk-email').value.trim(), phone:document.getElementById('bk-phone').value.trim()}, ancillaries, seat_selections: seatSelections, currency: cur
     })
   });
     document.getElementById('booking-form').classList.add('hidden');
     const totalPax = pax.adults + pax.children + pax.infants;
     const taxPax = pax.adults + pax.children;
-    const cur = searchData.segments[0]?.[selected[0]]?.currency || 'USD';
     const segFares = selected.map((idx,i)=>{
       const f = searchData.segments[i][idx];
       const fare = parseFloat(f.fare||0)||0;

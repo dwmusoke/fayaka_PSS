@@ -6309,6 +6309,7 @@ class Handler(BaseHTTPRequestHandler):
         tenant = self._portal_tenant(data.get('tenant'))
         if not tenant:
             return self._json({'error': 'Unknown airline portal'}, 404)
+        booking_currency = (data.get('currency') or '').strip().upper() or 'USD'
         flight_ids = data.get('flights') or []
         if isinstance(flight_ids, (str, int)):
             flight_ids = [flight_ids]
@@ -6375,14 +6376,14 @@ class Handler(BaseHTTPRequestHandler):
                         vals = [tenant['id'], row_pnr, pnr, f['id'], name, ptype, pax.get('doc_no'),
                                 contact.get('email') or pax.get('email') or sess_email,
                                 contact.get('phone') or pax.get('phone') or sess_phone, web_channel,
-                                f.get('origin'), cabin, fare, taxes, amount, f.get('currency') or 'USD',
+                                f.get('origin'), cabin, fare, taxes, amount, booking_currency,
                                 'unissued', 'pending', 'confirmed', 'portal', trace_id, itinerary_id, trip, idx,
                                 now_iso(), now_iso(), portal_customer_id]
                         conn.execute("INSERT INTO pss_bookings(" + ','.join(cols) + ") VALUES (" + ','.join(['?'] * len(cols)) + ")", vals)
                         bid = q(conn, "SELECT last_insert_rowid() v", (), one=True)['v']
                         booking_ids.append(bid)
                         rows_meta.append((bid, f['id']))
-                        self._seed_tax_lines(conn, tenant['id'], bid, {'taxes': taxes, 'currency': f.get('currency') or 'USD'})
+                        self._seed_tax_lines(conn, tenant['id'], bid, {'taxes': taxes, 'currency': booking_currency})
                 seat_by_flight = {}
                 for s in (data.get('seat_selections') or []):
                     fid = self._oid(s.get('flight_id'))
