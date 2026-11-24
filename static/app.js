@@ -2284,8 +2284,8 @@ async function renderInventoryPanel(el, dates, over, uncommitted){
       {name:'effective_from',label:'Effective from',type:'date'},
       {name:'effective_to',label:'Effective to',type:'date'}
     ];
-    const rows = (data.rules||[]).map(r=>[esc(r.rule_code||''),esc(r.rule_name||''),esc(r.rule_type||''),esc(r.pos||''),esc(r.subclass||''),esc(r.value||0),r.tia_enabled?'<span class="badge good">yes</span>':'-',esc(r.tia_percent||0),esc(r.status||''),invAct(r.id,'rules')]);
-    panel.innerHTML = `<div class="panel"><div class="panel-head"><h3>Inventory business rules &amp; TIA <button class="mini-btn primary" data-inv-new="rules">+ Add rule</button></h3></div><div class="panel-body">${invTable(['Code','Name','Type','POS','Class','Value','TIA','TIA %','Status',''],rows,'No inventory rules')}</div></div>`;
+    const rows = (data.rules||[]).map(r=>[esc(r.rule_code||''),esc(r.rule_name||''),esc(r.rule_type||''),esc(r.nest_type||'none'),esc(r.pos||''),esc(r.subclass||''),esc(r.value||0),r.tia_enabled?'<span class="badge good">yes</span>':'-',esc(r.tia_percent||0),esc(r.status||''),invAct(r.id,'rules')]);
+    panel.innerHTML = `<div class="panel"><div class="panel-head"><h3>Inventory business rules &amp; TIA <button class="mini-btn primary" data-inv-new="rules">+ Add rule</button></h3></div><div class="panel-body">${invTable(['Code','Name','Type','Nest','POS','Class','Value','TIA','TIA %','Status',''],rows,'No inventory rules')}<div class="muted tiny" style="margin-top:8px">Types: Segment limit, Gating, POS subclass logic, Hold expiry. Nesting: serial/parallel/mixed. TIA applies temporary adjustment %.</div></div></div>`;
     $('[data-inv-new="rules"]', panel).onclick = ()=>openInvEditor('Create inventory rule','rules',fields,null,el);
     wireInvEditors(el,'rules',fields,'rules');
     return;
