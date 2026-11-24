@@ -4548,64 +4548,160 @@ class Handler(BaseHTTPRequestHandler):
                          AND status='active'""", (tenant_id, tenant_id, flight['id']), one=True)
         return int((seg or {}).get('n') or 0) or int(flight.get('total_seats') or 0)
 
-    def _inv_compute(self, conn, tenant_id, flight, pos, subclass, segment_id=0):
+    def _inv_compute(self, conn, tenant_id, flight, pos, subclass, segment_id=0, _nest_ctx=None):
+        """Compute availability for a flight/POS/subclass/segment.
+        Nesting semantics:
+        - serial: hierarchical buckets; higher-value subclass consumes from shared nest capacity, lower subclasses limited by remaining after higher-priority protected seats.
+        - parallel: independent buckets per subclass (each limited by its own bucket/cap).
+        - mixed: subclass gets min(serial bucket, parallel bucket) style shared/independent blend.
+        Rules with nest_type apply to that mode; nest_bucket can target subclass list (e.g. Y,J).
+        """
         capacity = self._inv_capacity(conn, tenant_id, flight)
-        params = [tenant_id, flight['id']]
-        sql = """SELECT COUNT(*) n FROM pss_bookings b
-                 LEFT JOIN pss_channels c ON c.id=b.channel_id
-                 WHERE b.tenant_id=? AND b.flight_id=? AND COALESCE(b.booking_status,'confirmed') NOT IN ('cancelled','refunded','void')"""
-        if pos != 'ALL':
-            sql += " AND c.code=?"; params.append(pos)
-        if subclass != 'ALL':
-            sql += " AND b.fare_class=?"; params.append(subclass)
-        committed = int((q(conn, sql, params, one=True) or {}).get('n') or 0)
         seg_id = self._oid(segment_id) or 0
+        subclasses = ['Y','J','F']
+        # committed per subclass
+        committed_by = {}
+        for sc in subclasses:
+            params = [tenant_id, flight['id'], sc]
+            sql = """SELECT COUNT(*) n FROM pss_bookings b
+                     LEFT JOIN pss_channels c ON c.id=b.channel_id
+                     WHERE b.tenant_id=? AND b.flight_id=? AND COALESCE(b.booking_status,'confirmed') NOT IN ('cancelled','refunded','void')
+                       AND b.fare_class=?"""
+            if pos != 'ALL':
+                sql += " AND c.code=?"; params.append(pos)
+            committed_by[sc] = int((q(conn, sql, params, one=True) or {}).get('n') or 0)
+        committed_all = sum(committed_by.values()) if subclass=='ALL' else committed_by.get(subclass,0)
+
         rules = q(conn, """SELECT * FROM pss_inventory_rules
                            WHERE tenant_id=? AND status='active'
-                           AND (pos='ALL' OR pos=?) AND (subclass='ALL' OR subclass=?)
+                           AND (pos='ALL' OR pos=?) AND (subclass='ALL' OR subclass=? OR nest_type IN ('serial','parallel','mixed'))
                            AND (flight_id IS NULL OR flight_id=?)
                            AND (flight_date IS NULL OR flight_date='' OR flight_date=?)
                            AND (segment_id IS NULL OR segment_id=?)
                            ORDER BY priority ASC, id ASC""",
                   (tenant_id, pos, subclass, flight['id'], flight.get('flight_date'), seg_id or None))
-        cap = capacity
-        nest_caps = {'serial': cap, 'parallel': cap, 'mixed': cap}
-        for r in rules:
-            try:
-                value = float(r.get('value') or 0)
-            except Exception:
-                value = 0
-            rtype = str(r.get('rule_type') or '')
-            nest = str(r.get('nest_type') or 'none').lower()
-            if rtype == 'limit' and value > 0:
-                if nest in nest_caps: nest_caps[nest] = min(nest_caps[nest], int(value))
-                else: cap = min(cap, int(value))
-            elif rtype == 'gate' and value > 0:
-                threshold = value / 100 if value > 1 else value
-                if capacity and committed / capacity >= threshold:
-                    target = min(cap, committed)
-                    if nest in nest_caps: nest_caps[nest] = min(nest_caps[nest], target)
-                    else: cap = min(cap, committed)
-            elif rtype == 'pos_subclass' and value > 0:
-                if nest in nest_caps: nest_caps[nest] = max(0, nest_caps[nest] - int(value))
-                else: cap = max(0, cap - int(value))
-            if r.get('tia_enabled') and r.get('tia_percent'):
-                adj = int(capacity * float(r['tia_percent']) / 100)
-                if nest in nest_caps: nest_caps[nest] += adj
-                else: cap += adj
-        # nesting: serial=min (most restrictive), parallel=max (shared), mixed=average
-        active_nests = [v for k,v in nest_caps.items() if any(str(rr.get('nest_type') or '').lower()==k for rr in rules)]
-        if active_nests:
-            serial_cap = nest_caps['serial'] if any(str(rr.get('nest_type') or '').lower()=='serial' for rr in rules) else cap
-            parallel_cap = nest_caps['parallel'] if any(str(rr.get('nest_type') or '').lower()=='parallel' for rr in rules) else cap
-            mixed_cap = nest_caps['mixed'] if any(str(rr.get('nest_type') or '').lower()=='mixed' for rr in rules) else cap
-            nest_vals = []
-            if any(str(rr.get('nest_type') or '').lower()=='serial' for rr in rules): nest_vals.append(serial_cap)
-            if any(str(rr.get('nest_type') or '').lower()=='parallel' for rr in rules): nest_vals.append(parallel_cap)
-            if any(str(rr.get('nest_type') or '').lower()=='mixed' for rr in rules): nest_vals.append(mixed_cap)
-            if nest_vals: cap = min(cap, min(nest_vals))
-        available = max(0, int(cap) - committed)
-        return {'capacity': int(capacity), 'adjusted_capacity': int(cap), 'committed': committed, 'available': available, 'nesting': {k:v for k,v in nest_caps.items()}}
+
+        def _rule_applies(r, sc):
+            rsc = str(r.get('subclass') or 'ALL').upper()
+            bucket = [x.strip().upper() for x in str(r.get('nest_bucket') or '').split(',') if x.strip()]
+            if bucket:
+                return sc.upper() in bucket or rsc=='ALL'
+            return rsc=='ALL' or rsc==sc.upper()
+
+        # base caps by subclass
+        base = {sc: capacity for sc in subclasses}
+        mode = 'none'
+        # determine dominant nesting mode for requested scope
+        modes = [str(r.get('nest_type') or 'none').lower() for r in rules if str(r.get('nest_type') or 'none').lower() in ('serial','parallel','mixed')]
+        if modes:
+            # priority: explicit rule for subclass > any; pick most common/highest priority already ordered
+            mode = modes[0]
+
+        # apply non-nesting limits/gates/TIA as base adjustments
+        for sc in subclasses:
+            cap = capacity
+            for r in rules:
+                if not _rule_applies(r, sc):
+                    continue
+                nest = str(r.get('nest_type') or 'none').lower()
+                if nest in ('serial','parallel','mixed'):
+                    continue
+                try: value = float(r.get('value') or 0)
+                except Exception: value = 0
+                rtype = str(r.get('rule_type') or '')
+                if rtype == 'limit' and value > 0:
+                    cap = min(cap, int(value))
+                elif rtype == 'gate' and value > 0:
+                    threshold = value / 100 if value > 1 else value
+                    if capacity and committed_by.get(sc,0) / capacity >= threshold:
+                        cap = min(cap, committed_by.get(sc,0))
+                elif rtype == 'pos_subclass' and value > 0:
+                    cap = max(0, cap - int(value))
+                if r.get('tia_enabled') and r.get('tia_percent'):
+                    cap += int(capacity * float(r.get('tia_percent') or 0) / 100)
+            base[sc] = max(0, int(cap))
+
+        # nesting buckets
+        nest_caps = {sc: base[sc] for sc in subclasses}
+        if mode in ('serial','parallel','mixed'):
+            # collect per-mode bucket limits
+            serial_limits = {sc: base[sc] for sc in subclasses}
+            parallel_limits = {sc: base[sc] for sc in subclasses}
+            mixed_limits = {sc: base[sc] for sc in subclasses}
+            for r in rules:
+                nest = str(r.get('nest_type') or 'none').lower()
+                if nest not in ('serial','parallel','mixed'):
+                    continue
+                try: value = float(r.get('value') or 0)
+                except Exception: value = 0
+                rtype = str(r.get('rule_type') or '')
+                for sc in subclasses:
+                    if not _rule_applies(r, sc):
+                        continue
+                    target = serial_limits if nest=='serial' else parallel_limits if nest=='parallel' else mixed_limits
+                    if rtype == 'limit' and value > 0:
+                        target[sc] = min(target[sc], int(value))
+                    elif rtype == 'pos_subclass' and value > 0:
+                        target[sc] = max(0, target[sc] - int(value))
+                    elif rtype == 'gate' and value > 0:
+                        threshold = value / 100 if value > 1 else value
+                        if capacity and committed_by.get(sc,0) / capacity >= threshold:
+                            target[sc] = min(target[sc], committed_by.get(sc,0))
+                    if r.get('tia_enabled') and r.get('tia_percent'):
+                        target[sc] += int(capacity * float(r.get('tia_percent') or 0) / 100)
+                        target[sc] = max(0, int(target[sc]))
+
+            if mode == 'parallel':
+                nest_caps = {sc: max(0, int(parallel_limits[sc])) for sc in subclasses}
+            elif mode == 'serial':
+                # Serial nesting: Y highest priority, then J, then F from remaining capacity.
+                # Each class bucket cannot exceed its limit; cumulative commitment from higher classes reduces availability.
+                remaining = capacity
+                # optionally a shared serial cap rule for ALL can set remaining
+                for r in rules:
+                    if str(r.get('nest_type') or '').lower()=='serial' and str(r.get('subclass') or 'ALL').upper()=='ALL' and str(r.get('rule_type') or '')=='limit' and float(r.get('value') or 0)>0:
+                        remaining = min(remaining, int(float(r.get('value') or 0)))
+                for sc in ['Y','J','F']:
+                    limit_sc = max(0, int(serial_limits[sc]))
+                    # available for this class = min(class limit, remaining capacity) but cannot steal seats already committed by higher classes except accounting
+                    nest_caps[sc] = min(limit_sc, remaining)
+                    remaining = max(0, remaining - max(committed_by.get(sc,0), 0))
+                    # ensure remaining doesn't go below 0
+                # serial protection: lower class cannot exceed remaining after higher committed
+                nest_caps['J'] = min(nest_caps['J'], max(0, capacity - committed_by.get('Y',0)))
+                nest_caps['F'] = min(nest_caps['F'], max(0, capacity - committed_by.get('Y',0) - committed_by.get('J',0)))
+            elif mode == 'mixed':
+                # Mixed: parallel per-class limits intersected with serial shared protection.
+                remaining = capacity
+                for r in rules:
+                    if str(r.get('nest_type') or '').lower()=='mixed' and str(r.get('subclass') or 'ALL').upper()=='ALL' and str(r.get('rule_type') or '')=='limit' and float(r.get('value') or 0)>0:
+                        remaining = min(remaining, int(float(r.get('value') or 0)))
+                serial_view = {}
+                for sc in ['Y','J','F']:
+                    serial_view[sc] = min(max(0,int(mixed_limits[sc])), remaining)
+                    remaining = max(0, remaining - committed_by.get(sc,0))
+                nest_caps['Y'] = max(0, min(int(parallel_limits['Y']), int(serial_view['Y'])))
+                nest_caps['J'] = max(0, min(int(parallel_limits['J']), int(serial_view['J']), capacity - committed_by.get('Y',0)))
+                nest_caps['F'] = max(0, min(int(parallel_limits['F']), int(serial_view['F']), capacity - committed_by.get('Y',0) - committed_by.get('J',0)))
+
+        # final cap/available
+        if subclass == 'ALL':
+            # ALL reflects total sellable: sum of nested buckets capped by capacity
+            total_bucket = sum(nest_caps.get(sc,0) for sc in subclasses)
+            cap = min(capacity, total_bucket) if mode in ('parallel','mixed') else min(capacity, max(nest_caps.values()) if nest_caps else capacity)
+            if mode == 'serial':
+                cap = min(capacity, nest_caps.get('Y',capacity))
+            committed = sum(committed_by.values())
+        else:
+            sc = subclass.upper()
+            cap = min(capacity, int(nest_caps.get(sc, base.get(sc, capacity))))
+            committed = committed_by.get(sc, 0)
+        available = max(0, int(cap) - int(committed))
+        return {
+            'capacity': int(capacity), 'adjusted_capacity': int(cap), 'committed': int(committed), 'available': int(available),
+            'nesting': {'mode': mode, 'buckets': nest_caps, 'committed_by_subclass': committed_by}
+        }
+
 
     def _inv_publish(self, conn, tenant_id, actor=None):
         flights = self._inv_baseline(conn, tenant_id)
@@ -4618,11 +4714,10 @@ class Handler(BaseHTTPRequestHandler):
             segs = q(conn, """SELECT id FROM pss_inventory_segments
                               WHERE tenant_id=? AND leg_id IN (SELECT id FROM pss_inventory_legs WHERE tenant_id=? AND flight_id=?)""",
                      (tenant_id, tenant_id, f['id']))
+            seg_ids = ([0] + [int(s['id']) for s in segs]) if segs else [0]
             for pos in channels:
-                for subclass in subclasses:
-                    values = self._inv_compute(conn, tenant_id, f, pos, subclass)
-                    seg_ids = ([0] + [int(s['id']) for s in segs]) if segs else [0]
-                    for sid in seg_ids:
+                for sid in seg_ids:
+                    for subclass in subclasses:
                         seg_vals = self._inv_compute(conn, tenant_id, f, pos, subclass, sid)
                         existing = q(conn, """SELECT id,version FROM pss_inventory_availability
                                               WHERE tenant_id=? AND flight_id=? AND segment_id=? AND pos=? AND pos_subclass=?""",
