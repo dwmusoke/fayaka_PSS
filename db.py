@@ -18,6 +18,7 @@ if _raw_db_url and "sslmode=" not in _raw_db_url and ("supabase.co" in _raw_db_u
     _raw_db_url += ("&" if "?" in _raw_db_url else "?") + "sslmode=require"
 DATABASE_URL = _raw_db_url
 USING_POSTGRES = DATABASE_URL.startswith("postgresql://")
+REQUIRE_POSTGRES = (os.environ.get("REQUIRE_POSTGRES") or "").strip().lower() in ("1", "true", "yes", "on") or bool(os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("RAILWAY_PROJECT_ID"))
 
 
 def now_iso():
@@ -244,6 +245,11 @@ def get_conn():
             raise RuntimeError("DATABASE_URL is set but psycopg is not installed. Run: pip install -r requirements.txt") from e
         conn = psycopg.connect(DATABASE_URL, autocommit=False, row_factory=dict_row)
         return _PGConn(conn)
+    if REQUIRE_POSTGRES:
+        raise RuntimeError(
+            "DATABASE_URL/SUPABASE_DB_URL is required in Railway/production. "
+            "Refusing SQLite fallback to prevent ephemeral data loss."
+        )
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row

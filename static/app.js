@@ -805,10 +805,38 @@ async function renderList(name, el, pageArg){
           const checkinRows = checkins.length ? `<div class="table-wrap"><table><thead><tr><th>Check-in</th><th>Seat</th><th>Bags</th><th>Status</th><th>Time</th></tr></thead><tbody>${checkins.map(c=>`<tr><td>${esc(c.checkin_no||'-')}</td><td>${esc(c.seat_no||'-')}</td><td>${esc(c.bag_count??0)}</td><td>${statusBadge(c.status||'')}</td><td>${esc((c.checked_in_at||c.created_at||'').slice(0,16).replace('T',' '))}</td></tr>`).join('')}</tbody></table></div>` : '<div class="muted tiny">No check-ins.</div>';
           showModal(`Booking A� ${esc(b.pnr||btn.getAttribute('data-ref')||id)}`,
             `<div class="form-cols">${fields.map(k=>`<div><label>${fieldLabel(k)}</label><div>${cellFor(k,b[k]!==undefined?b[k]:row[k])}</div></div>`).join('')}</div>
-             <div style="margin-top:14px"><h4>Payments</h4>${payRows}</div>
+             <div style="margin-top:14px;display:flex;justify-content:space-between;align-items:center;gap:8px"><h4 style="margin:0">Payments</h4><button type="button" class="mini-btn primary" id="booking-record-payment-${esc(id)}">Record payment</button></div>
+             <div id="booking-payments-${esc(id)}">${payRows}</div>
              <div style="margin-top:14px"><h4>Check-ins</h4>${checkinRows}</div>
              ${events.length?`<div style="margin-top:14px"><h4>Ticket events</h4><div class="table-wrap"><table><thead><tr><th>Status</th><th>Reason</th><th>Actor</th><th>Date</th></tr></thead><tbody>${events.map(ev=>`<tr><td>${statusBadge(ev.ticket_status||ev.previous_status||'')}</td><td>${esc(ev.reason||'-')}</td><td>${esc(ev.actor||'-')}</td><td>${esc((ev.created_at||'').slice(0,16).replace('T',' '))}</td></tr>`).join('')}</tbody></table></div></div>`:''}
              <div class="cta-row"><button type="button" class="secondary" onclick="hideModal()">Close</button></div>`);
+          const payBtn = document.getElementById(`booking-record-payment-${id}`);
+          if(payBtn) payBtn.onclick = ()=>{
+            const cur = b.currency || defaultCurrency();
+            showModal('Record payment', `<form id="f-booking-pay-${esc(id)}" class="form-grid"><div class="form-cols">
+              <div><label>Booking ID</label><input name="booking_id" value="${esc(b.id||id)}" readonly></div>
+              <div><label>PNR</label><input name="pnr" value="${esc(b.pnr||'')}" readonly></div>
+              <div><label>Amount</label><input name="amount" type="number" step="0.01" min="0" value="${esc(b.total_amount||0)}" required></div>
+              <div><label>Currency</label><input name="currency" value="${esc(cur)}"></div>
+              <div><label>Method</label><select name="method"><option value="cash">Cash</option><option value="card">Card</option><option value="mobile_money">Mobile Money</option><option value="bank">Bank</option><option value="transfer">Transfer</option><option value="flutterwave">Flutterwave</option></select></div>
+              <div><label>Status</label><select name="status"><option value="captured">Captured</option><option value="paid">Paid</option><option value="pending">Pending</option></select></div>
+              <div><label>Reference</label><input name="reference"></div>
+              <div><label>Notes</label><input name="notes"></div>
+            </div><div class="cta-row"><button type="submit" class="primary">Save payment</button><button type="button" class="secondary mini-btn" onclick="hideModal()">Cancel</button></div><div id="f-booking-pay-${esc(id)}-msg" class="small"></div></form>`);
+            const f = document.getElementById(`f-booking-pay-${id}`);
+            if(f) f.onsubmit = async (e)=>{
+              e.preventDefault();
+              const msg = document.getElementById(`f-booking-pay-${id}-msg`);
+              if(msg){ msg.textContent=''; msg.className='small'; }
+              const data = Object.fromEntries(new FormData(f).entries());
+              data.booking_id = Number(data.booking_id||id);
+              data.amount = Number(data.amount||0);
+              try{
+                await api('/api/pss/payments',{method:'POST',body:JSON.stringify(data)});
+                hideModal(); toast('Payment recorded'); renderList(name, el);
+              }catch(err){ if(msg){ msg.textContent=err.message; msg.className='small error'; } else toast(err.message,'error'); }
+            };
+          };
           return;
         }
         showModal(`${btn.textContent} · ${btn.getAttribute('data-ref')||id}`,

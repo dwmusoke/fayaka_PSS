@@ -25,7 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime, timedelta, date
 
-from db import init_db, db, q, now_iso, log_audit, get_conn, seed_pss
+from db import init_db, db, q, now_iso, log_audit, get_conn, seed_pss, USING_POSTGRES
 from ingest import scan_and_import_air
 from air_parser import parse_air_text
 from documents import build_pdf, branding_from_row
@@ -801,7 +801,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._csrf_ok(path, qs):
                     return self._json({'error': 'CSRF token missing or invalid'}, 403)
             if path == '/api/health':
-                return self._json({'status': 'ok', 'tenant': DEFAULT_TENANT})
+                return self._json({'status': 'ok', 'tenant': DEFAULT_TENANT, 'db': 'postgres' if USING_POSTGRES else 'sqlite'})
             if path == '/api/public/v1/docs' and method == 'GET':
                 return self.api_public_docs()
             if path == '/api/public/v1/offers' and method == 'POST':
@@ -5029,6 +5029,10 @@ class Handler(BaseHTTPRequestHandler):
             self._activity(conn, tenant_id, 'pss_booking', bid, 'ticket_issued', ticket, user_id)
             self._trace(conn, tenant_id, 'counter', 'pss_booking', bid, 'ticket_issued', user_id, ticket, row.get('trace_id'), self)
             self._doc_audit(conn, tenant_id, 'eticket', ticket, bid, row.get('pnr'), 'ticket_issued', user_id, row.get('trace_id'), {'ticket_number': ticket})
+            try:
+                self._erp_sync_pss_booking(conn, tenant_id, bid, actor=user_id or 'counter', source='counter')
+            except Exception:
+                pass
             log_audit(conn, tenant_id, user_id, 'issue_ticket', 'pss_booking', bid, {'ticket_number': ticket})
         return self._json({'ok': True, 'ticket_number': ticket})
 
@@ -5714,26 +5718,29 @@ class Handler(BaseHTTPRequestHandler):
                   [tenant_id] + trip_ids, one=True)
             oid = o['id'] if o else None
         total = round(sum(float(r.get('total_amount') or 0) for r in trip_rows), 2)
+        paid_total = (q(conn, f"SELECT COALESCE(SUM(amount),0) v FROM pss_payments WHERE tenant_id=? AND booking_id IN ({trip_marks}) AND status IN ('captured','paid')", [tenant_id] + trip_ids, one=True) or {}).get('v', 0)
+        balance_due = round(max(total - float(paid_total or 0), 0), 2)
+        order_ticket_status = 'ticketed' if (b.get('ticket_status') or '') == 'issued' else (b.get('ticket_status') or 'unissued')
         pnr = trip_key or f"PSS-{bid}"
         src = f"pss_booking:{bid}"
         if not oid:
             conn.execute("""INSERT INTO orders(tenant_id,branch_id,source_type,source_id,connector_id,raw_document_id,pnr,order_number,office_id,account_code,customer_id,owner_user_id,product_type,status,ticket_status,tktl,booking_date,travel_start,travel_end,origin,destination,currency,total_sell,total_cost,margin,balance_due,notes,created_at,updated_at,agency_id,pss_booking_id,booking_source,trace_id)
                             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                          (tenant_id, None, 'pss_booking', src, None, None, pnr, pnr, b.get('airport_code'), None, cid, b.get('created_by'),
-                          'Flight', b.get('booking_status') or 'booked', b.get('ticket_status') or 'unissued', None,
+                          'Flight', b.get('booking_status') or 'booked', order_ticket_status, None,
                           (b.get('created_at') or ts)[:10], b.get('flight_date'), b.get('flight_date'),
                           b.get('origin'), b.get('destination'), b.get('currency') or self._tenant_currency(conn, tenant_id) or 'USD',
-                          total, 0, total, total, f"PSS booking {pnr}", ts, ts, agency_id, bid, source, b.get('trace_id')))
+                          total, 0, total, balance_due, f"PSS booking {pnr}", ts, ts, agency_id, bid, source, b.get('trace_id')))
             oid = q(conn, "SELECT last_insert_rowid() v", (), one=True)['v']
         else:
             conn.execute("""UPDATE orders SET customer_id=?, pnr=COALESCE(?,pnr), origin=?, destination=?, currency=?,
-                            total_sell=?, margin=?, balance_due=CASE WHEN balance_due=0 THEN 0 ELSE ? END,
+                            total_sell=?, margin=?, balance_due=?,
                             booking_date=COALESCE(?,booking_date), travel_start=?, travel_end=?, updated_at=?,
                             agency_id=COALESCE(?,agency_id), booking_source=?, trace_id=?, ticket_status=?
                             WHERE id=? AND tenant_id=?""",
-                         (cid, pnr, b.get('origin'), b.get('destination'), b.get('currency') or self._tenant_currency(conn, tenant_id) or 'USD', total, total, total,
+                         (cid, pnr, b.get('origin'), b.get('destination'), b.get('currency') or self._tenant_currency(conn, tenant_id) or 'USD', total, total, balance_due,
                           (b.get('created_at') or ts)[:10], b.get('flight_date'), b.get('flight_date'), ts,
-                          agency_id, source, b.get('trace_id'), b.get('ticket_status') or 'unissued', oid, tenant_id))
+                          agency_id, source, b.get('trace_id'), order_ticket_status, oid, tenant_id))
         # invoice
         iid = b.get('invoice_id')
         inv_no = ''

@@ -144,4 +144,4 @@ python import_air.py ../
 - Use **Setup → Airline Onboarding** for the launch checklist and provisioning isolated airline tenants with seeded PSS defaults.
 
 ## Data & deployment
-Local development uses SQLite. For Supabase/PostgreSQL set `DATABASE_URL` (see `.env.example` and `DEPLOYMENT.md`); psycopg is installed from `requirements.txt`. Static front end is ready for Vercel via `vercel.json`; the Python API runs on a container host (Dockerfile/Procfile).
+Local development uses SQLite by default. For Railway/Supabase/PostgreSQL set `DATABASE_URL` (see `.env.example` and `DEPLOYMENT.md`); psycopg is installed from `requirements.txt`. On Railway or with `REQUIRE_POSTGRES=1`, the app refuses SQLite fallback to avoid ephemeral data loss. Static front end is ready for Vercel via `vercel.json`; the Python API runs on a container host (Dockerfile/Procfile).
