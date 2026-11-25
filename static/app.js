@@ -604,7 +604,6 @@ function cellFor(key, val){
   if(key==='is_active'||key==='active') return (val?`<span class="badge good">active</span>`:`<span class="badge bad">inactive</span>`);
   if(key==='action') return (val===null||val===undefined||val==='') ? `<span class="muted">-</span>` : String(val);
   if(val===null||val===undefined||val==='') return `<span class="muted">-</span>`;
-  if(/pnr|_no$|_number$|doc_no|trace_id|ticket|invoice|receipt|offer|sale_no|case_no/i.test(key)) return `<button class="mini-btn" data-copy="${esc(String(val))}" title="Copy">${esc(String(val))}</button>`;
   return esc(val);
 }
 async function apiDelete(path,id){
