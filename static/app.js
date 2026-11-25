@@ -634,6 +634,9 @@ function wireExcelResize(root){
     });
   });
 }
+function btn(label, cls, content='', extra=''){
+  return `<button class="mini-btn ${cls||'secondary'}" ${extra||''}>${content||''}${esc(label)}</button>`;
+}
 function actionLabel(a){
   if(a && a.label) return esc(a.label);
   if(typeof a==='string') return esc(a.charAt(0).toUpperCase()+a.slice(1));
