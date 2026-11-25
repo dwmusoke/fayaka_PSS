@@ -634,6 +634,11 @@ function wireExcelResize(root){
     });
   });
 }
+function actionLabel(a){
+  if(a && a.label) return esc(a.label);
+  if(typeof a==='string') return esc(a.charAt(0).toUpperCase()+a.slice(1));
+  return esc(String(a||''));
+}
 async function renderList(name, el, pageArg){
   const meta = viewMeta[name] || [name,'','Workspace'];
   const cfg = cfgFor(name);
@@ -684,7 +689,7 @@ async function renderList(name, el, pageArg){
     const ref = r.invoice_no||r.payment_no||r.pnr||r.sale_no||r.offer_no||r.order_no||r.name||r.title||r[idKey]||'';
     if(modern && mode==='card') return modernRecordCard(name, r, rid, ref, defs);
     const cells = headCols.map(c=>`<td title="${esc(String(r[c]??''))}">${cellFor(c,r[c])}</td>`).join('');
-    const menuItems = defs.length?defs.map(a=>`<button data-action="item" data-item-action="${esc(a)}" data-id="${rid}" data-name="${esc(String(ref))}">${actionLabel(a)}</button>`).join(''):'';
+    const menuItems = defs.length?defs.map(a=>`<button data-action="item" data-item-action="${esc(typeof a==='string'?a:(a&&a.action))}" data-id="${rid}" data-name="${esc(String(ref))}">${actionLabel(a)}</button>`).join(''):'';
     return `<tr>${cells}<td class="actions-cell"><div class="action-menu-wrap"><button class="mini-btn" data-action="menu">⋯</button><div class="action-menu hidden">${menuItems||'<span class="muted">No actions</span>'}</div></div></td></tr>`;
   }).join('');
   const pageMeta = allRows.length ? `<div class="small muted">Showing ${((page - 1) * PAGE_SIZE) + 1}-${Math.min(page * PAGE_SIZE, allRows.length)} of ${allRows.length}</div>` : '';
