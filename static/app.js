@@ -615,7 +615,6 @@ async function apiPut(path,id,data){
 function ctaBtn(label, action, id, extra='', cls='secondary', danger=false){
   return `<button class="mini-btn ${danger?'danger':''}${cls?` ${cls}`:''}" data-action="${esc(action)}" data-id="${esc(id)}"${extra?` data-extra="${esc(extra)}"`:''}>${esc(label)}</button>`;
 }
-async 
 function wireExcelResize(root){
   const table = root.querySelector('.excel-table');
   if(!table) return;
