@@ -615,6 +615,26 @@ async function apiPut(path,id,data){
 function ctaBtn(label, action, id, extra='', cls='secondary', danger=false){
   return `<button class="mini-btn ${danger?'danger':''}${cls?` ${cls}`:''}" data-action="${esc(action)}" data-id="${esc(id)}"${extra?` data-extra="${esc(extra)}"`:''}>${esc(label)}</button>`;
 }
+async 
+function wireExcelResize(root){
+  const table = root.querySelector('.excel-table');
+  if(!table) return;
+  const ths = table.querySelectorAll('thead th.resizable-th');
+  ths.forEach((th, i)=>{
+    const handle = th.querySelector('.col-resize');
+    if(!handle) return;
+    handle.addEventListener('mousedown', (e)=>{
+      e.preventDefault(); e.stopPropagation();
+      const startX = e.pageX;
+      const startW = th.getBoundingClientRect().width;
+      handle.classList.add('resizing');
+      const onMove = (ev)=>{ const w = Math.max(60, startW + (ev.pageX - startX)); th.style.width = w+'px'; th.style.minWidth = w+'px'; th.style.maxWidth = w+'px'; };
+      const onUp = ()=>{ handle.classList.remove('resizing'); document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+  });
+}
 async function renderList(name, el, pageArg){
   const meta = viewMeta[name] || [name,'','Workspace'];
   const cfg = cfgFor(name);
@@ -656,37 +676,30 @@ async function renderList(name, el, pageArg){
   const idKey = cols.find(c=>c==='id') || cols[0] || 'id';
   const headCols = cols.filter(c=>!FIELD_TYPES[c]?.startsWith('hidden') && c!==idKey);
   const actions = rows.length?`<th style="width:170px">Actions</th>`:'';
-  const head = `<tr>${headCols.map(c=>`<th>${fieldLabel(c)}</th>`).join('')}${actions}</tr>`;
+  const head = `<tr>${headCols.map(c=>`<th class="resizable-th">${fieldLabel(c)}<span class="col-resize"></span></th>`).join('')}${actions}</tr>`;
   const defs = actionsFor(name);
   const modern = MODERN_RECORD_VIEWS.has(name);
   const mode = modern ? recordMode(name) : 'list';
   const body = rows.map(r=>{
     const rid = esc(r[idKey]||'');
     const ref = r.invoice_no||r.payment_no||r.pnr||r.sale_no||r.offer_no||r.order_no||r.name||r.title||r[idKey]||'';
-    if(modern) return mode==='card' ? modernRecordCard(name, r, rid, ref, defs) : modernRecordRow(name, r, rid, ref, defs);
-    const cells = headCols.map(c=>`<td>${cellFor(c,r[c])}</td>`).join('');
-    const menuItems = defs.map(a=>`<button type="button" class="${a.danger?'danger':''}" data-action="${esc(a.action)}" data-id="${rid}" data-view="${esc(name)}" data-ref="${esc(ref)}"${a.pdf?` data-pdf="${esc(a.pdf)}"`:''}>${esc(a.label)}</button>`).join('');
-    const act = `<div class="action-cell"><button type="button" class="icon-btn" data-action="menu" title="Actions" aria-label="Actions">⋮</button><div class="action-menu hidden">${menuItems}</div></div>`;
-    return `<tr data-id="${rid}">${cells}<td>${act}</td></tr>`;
+    if(modern && mode==='card') return modernRecordCard(name, r, rid, ref, defs);
+    const cells = headCols.map(c=>`<td title="${esc(String(r[c]??''))}">${cellFor(c,r[c])}</td>`).join('');
+    const menuItems = defs.length?defs.map(a=>`<button data-action="item" data-item-action="${esc(a)}" data-id="${rid}" data-name="${esc(String(ref))}">${actionLabel(a)}</button>`).join(''):'';
+    return `<tr>${cells}<td class="actions-cell"><div class="action-menu-wrap"><button class="mini-btn" data-action="menu">⋯</button><div class="action-menu hidden">${menuItems||'<span class="muted">No actions</span>'}</div></div></td></tr>`;
   }).join('');
-  const kpiHtml = kpis?`<div class="grid kpi-row" style="margin-bottom:16px">${Object.entries(kpis).map(([k,v])=>dashboardKpi(k,v)).join('')}</div>`:'';
-  const emptyMsg = rows.length?`${rows.length} record${rows.length>1?'s':''}`:'No records';
-  const pagHtml = allRows.length > PAGE_SIZE ? pager(name, page, totalPages, allRows.length) : '';
-  const createFields = cfg.fields || [];
-  const createLabel = CREATE_LABELS[name] || `Create ${fieldLabel(name)}`;
-  const editLabel = EDIT_LABELS[name] || `Update ${fieldLabel(name)}`;
-  const createForm = createFields.length?`<form id="f-create-${esc(name)}" class="form-grid"><div class="form-cols">${schemaFields(createFields)}</div><div class="cta-row"><button type="submit" class="primary">Save ${esc(createLabel.toLowerCase())}</button><button type="button" class="secondary mini-btn" onclick="hideModal()">Cancel</button></div><div id="f-create-${esc(name)}-msg" class="small"></div></form>`:'';
-  const createBtn = createFields.length?`<button class="mini-btn primary" data-action="create-${esc(name)}">+ ${esc(createLabel)}</button>`:'';
-  const modeToggle = modern?`<div class="segmented record-mode" role="group" aria-label="Record display">
-    <button type="button" class="${mode==='list'?'active':''}" data-action="record-mode" data-mode="list" aria-pressed="${mode==='list'}">List</button>
-    <button type="button" class="${mode==='card'?'active':''}" data-action="record-mode" data-mode="card" aria-pressed="${mode==='card'}">Cards</button>
-  </div>`:'';
-  el.innerHTML = `${pageHead(esc(meta[0]), esc(meta[1]||''), createBtn)}
-    ${kpiHtml}
-    <div class="panel${modern?' panel-records':''}"><div class="panel-head"><div><h3>${esc(meta[0])} records</h3><div class="muted tiny">${emptyMsg}</div></div>${modeToggle}</div><div class="panel-body">
-      ${rows.length?(modern?`<div class="${mode==='card'?'record-card-grid':'record-list'}">${body}</div>`:`<div class="table-wrap"><table><thead>${head}</thead><tbody>${body}</tbody></table></div>`):`<div class="table-wrap"><div class="empty">No records available for ${esc(meta[0])}.</div></div>`}
+  const pageMeta = allRows.length ? `<div class="small muted">Showing ${((page - 1) * PAGE_SIZE) + 1}-${Math.min(page * PAGE_SIZE, allRows.length)} of ${allRows.length}</div>` : '';
+  const pager = allRows.length > PAGE_SIZE ? `<div class="table-pager">${pageMeta}<div class="pager-actions"><button class="mini-btn" data-page="prev" ${page<=1?'disabled':''}>Prev</button><span class="small muted">Page ${page} / ${totalPages}</span><button class="mini-btn" data-page="next" ${page>=totalPages?'disabled':''}>Next</button></div></div>` : pageMeta;
+  const pagHtml = pager ? `<div class="table-pager-wrap">${pager}</div>` : '';
+  el.innerHTML = `${pageHead(esc(meta[0]), esc(meta[1]||''), `${btn('New','primary',`<svg class="btn-ic" viewBox="0 0 16 16"><path d="M8 2v12M2 8h12"/></svg>`,`data-action="new-record"`)}${btn('Refresh','ghost','',`data-action="refresh-view"`)}`)}
+    ${kpiStrip(kpis)}
+    <div class="panel"><div class="panel-head"><h3>${esc(meta[0])} records</h3>${modern?recordModeToggle(mode):''}</div><div class="panel-body">
+      ${rows.length?
+        (modern && mode==='card' ? `<div class="record-card-grid">${body}</div>` : `<div class="table-wrap excel-grid"><table class="excel-table"><thead>${head}</thead><tbody>${body}</tbody></table></div>`)
+        : `<div class="table-wrap"><div class="empty">No records available for ${esc(meta[0])}.</div></div>`}
     </div></div>
     ${pagHtml}`;
+  wireExcelResize(el);
   el.querySelectorAll('[data-action="record-mode"]').forEach(btn=>{
     btn.onclick = ()=>{
       try{ localStorage.setItem('pss-record-mode-'+name, btn.getAttribute('data-mode')); }catch(e){}

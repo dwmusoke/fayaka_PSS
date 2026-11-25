@@ -516,3 +516,17 @@ html[data-theme="dark"] .profile-avatar { color: #08111f; }
   .panel { box-shadow: none; border: 1px solid #cbd5e1; break-inside: avoid; }
   .bag-tag-no { color: #000 !important; background: #fff !important; border: 2px solid #000; }
 }
+
+
+/* Excel-like list view */
+.excel-grid { overflow: auto; max-height: min(70vh, 760px); }
+.excel-table { width: max-content; min-width: 100%; border-collapse: separate; border-spacing: 0; table-layout: fixed; font-size: 12px; }
+.excel-table th, .excel-table td { border-right: 1px solid #e2e8f0; border-bottom: 1px solid #e2e8f0; padding: 6px 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+.excel-table th { position: sticky; top: 0; z-index: 2; background: #f1f5f9; font-size: 11px; font-weight: 700; color: #334155; user-select: none; }
+.excel-table th:first-child, .excel-table td:first-child { border-left: 1px solid #e2e8f0; }
+.excel-table thead tr:first-child th { border-top: 1px solid #e2e8f0; }
+.excel-table tbody tr:hover td { background: #f8fafc; }
+.excel-table .actions-cell { overflow: visible; max-width: none; white-space: nowrap; }
+.resizable-th { position: relative; padding-right: 14px !important; }
+.col-resize { position: absolute; top: 0; right: 0; width: 6px; height: 100%; cursor: col-resize; user-select: none; }
+.col-resize:hover, .col-resize.resizing { background: rgba(59,130,246,.35); }
