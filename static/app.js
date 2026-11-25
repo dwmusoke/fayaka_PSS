@@ -657,6 +657,42 @@ function actionLabel(a){
   if(typeof a==='string') return esc(a.charAt(0).toUpperCase()+a.slice(1));
   return esc(String(a||''));
 }
+function wireCellEditors(root){
+  const table = root.querySelector('.excel-table');
+  if(!table) return;
+  const view = table.closest('[data-view]')?.getAttribute('data-view') || root.getAttribute('data-view');
+  table.querySelectorAll('td[data-field]:not(.actions-cell)').forEach(td=>{
+    td.addEventListener('click', async ()=>{
+      if(td.classList.contains('editing')) return;
+      const row = td.closest('tr');
+      if(!row) return;
+      const field = td.getAttribute('data-field');
+      const id = row.getAttribute('data-id');
+      const path = row.getAttribute('data-path');
+      const cur = td.textContent.trim();
+      td.classList.add('editing');
+      td.innerHTML = `<input type="text" value="${esc(cur)}" class="cell-edit" style="width:100%;box-sizing:border-box;padding:4px 6px;font:inherit">`;
+      const inp = td.querySelector('.cell-edit');
+      inp.focus();
+      inp.setSelectionRange(0, inp.value.length);
+      const finish = async ()=>{
+        const val = inp.value;
+        if(val===cur){ td.classList.remove('editing'); td.textContent = cur; return; }
+        try{
+          await api(path+'/'+encodeURIComponent(id),{method:'PUT',body:JSON.stringify({[field]:val})});
+          td.textContent = val;
+        }catch(e){
+          toast('Update failed: '+(e.message||String(e)),'error');
+          td.textContent = cur;
+        }finally{
+          td.classList.remove('editing');
+        }
+      };
+      inp.addEventListener('keydown', (e)=>{ if(e.key==='Enter'){ e.preventDefault(); finish(); } if(e.key==='Escape'){ td.classList.remove('editing'); td.textContent=cur; } });
+      inp.addEventListener('blur', finish);
+    });
+  });
+}
 async function renderList(name, el, pageArg){
   const meta = viewMeta[name] || [name,'','Workspace'];
   const cfg = cfgFor(name);
@@ -706,9 +742,9 @@ async function renderList(name, el, pageArg){
     const rid = esc(r[idKey]||'');
     const ref = r.invoice_no||r.payment_no||r.pnr||r.sale_no||r.offer_no||r.order_no||r.name||r.title||r[idKey]||'';
     if(modern && mode==='card') return modernRecordCard(name, r, rid, ref, defs);
-    const cells = headCols.map(c=>`<td title="${esc(String(r[c]??''))}">${cellFor(c,r[c])}</td>`).join('');
+    const cells = headCols.map(c=>`<td data-field="${esc(c)}" title="${esc(String(r[c]??''))}">${cellFor(c,r[c])}</td>`).join('');
     const menuItems = defs.length?defs.map(a=>`<button data-action="item" data-item-action="${esc(typeof a==='string'?a:(a&&a.action))}" data-id="${rid}" data-name="${esc(String(ref))}">${actionLabel(a)}</button>`).join(''):'';
-    return `<tr>${cells}<td class="actions-cell"><div class="action-menu-wrap"><button class="mini-btn" data-action="menu">⋯</button><div class="action-menu hidden">${menuItems||'<span class="muted">No actions</span>'}</div></div></td></tr>`;
+    return `<tr data-view="${esc(name)}" data-path="${esc(path)}" data-id="${esc(rid)}">${cells}<td class="actions-cell"><div class="action-menu-wrap"><button class="mini-btn" data-action="menu">⋯</button><div class="action-menu hidden">${menuItems||'<span class="muted">No actions</span>'}</div></div></td></tr>`;
   }).join('');
   const pageMeta = allRows.length ? `<div class="small muted">Showing ${((page - 1) * PAGE_SIZE) + 1}-${Math.min(page * PAGE_SIZE, allRows.length)} of ${allRows.length}</div>` : '';
   const pager = allRows.length > PAGE_SIZE ? `<div class="table-pager">${pageMeta}<div class="pager-actions"><button class="mini-btn" data-page="prev" ${page<=1?'disabled':''}>Prev</button><span class="small muted">Page ${page} / ${totalPages}</span><button class="mini-btn" data-page="next" ${page>=totalPages?'disabled':''}>Next</button></div></div>` : pageMeta;
@@ -722,6 +758,7 @@ async function renderList(name, el, pageArg){
     </div></div>
     ${pagHtml}`;
   wireExcelResize(el);
+  wireCellEditors(el);
   el.querySelectorAll('[data-action="record-mode"]').forEach(btn=>{
     btn.onclick = ()=>{
       try{ localStorage.setItem('pss-record-mode-'+name, btn.getAttribute('data-mode')); }catch(e){}

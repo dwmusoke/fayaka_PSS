@@ -526,7 +526,17 @@ html[data-theme="dark"] .profile-avatar { color: #08111f; }
 .excel-table th:first-child, .excel-table td:first-child { border-left: 1px solid #e2e8f0; }
 .excel-table thead tr:first-child th { border-top: 1px solid #e2e8f0; }
 .excel-table tbody tr:hover td { background: #f8fafc; }
-.excel-table .actions-cell { overflow: visible; max-width: none; white-space: nowrap; }
+.excel-table .actions-cell { position: relative; overflow: visible; max-width: none; white-space: nowrap; z-index: 10; }
+.excel-table .action-menu-wrap { position: relative; display: inline-block; }
+.excel-table .actions-cell .action-menu { position: absolute; right: 0; top: 100%; margin-top: 4px; }
+.excel-table td.actions-cell { overflow: visible !important; max-width: none !important; }
+.excel-table td:not(.actions-cell) { overflow: visible; max-width: none; white-space: normal; text-overflow: clip; cursor: pointer; }
+.excel-table td:not(.actions-cell):hover { background: #eef6ff; }
 .resizable-th { position: relative; padding-right: 14px !important; }
 .col-resize { position: absolute; top: 0; right: 0; width: 6px; height: 100%; cursor: col-resize; user-select: none; }
 .col-resize:hover, .col-resize.resizing { background: rgba(59,130,246,.35); }
+
+
+/* Inline cell editing */
+.excel-table td.editing { background: #fffde7; position: relative; z-index: 5; }
+.excel-table td.editing .cell-edit { border: 1px solid #2563eb; border-radius: 4px; outline: none; }
