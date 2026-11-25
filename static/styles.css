@@ -179,7 +179,7 @@ html[data-theme="dark"] .kpi-icon { color: inherit; }
 .grid.dashboard-pair { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .dashboard-pair .panel-body { padding: 0; }
 .dashboard-pair .panel-body .empty { margin: 15px; }
-.dashboard-pair table { margin: 0; table-layout: fixed; }
+.dashboard-pair table { margin: 0; table-layout: auto; width: 100%; }
 .dashboard-pair th, .dashboard-pair td { padding: 10px 12px; vertical-align: middle; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dashboard-pair th:first-child, .dashboard-pair td:first-child { width: 26%; }
 .dashboard-pair th:last-child, .dashboard-pair td:last-child { width: 22%; }
