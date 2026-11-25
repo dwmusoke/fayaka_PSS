@@ -637,6 +637,15 @@ function wireExcelResize(root){
 function btn(label, cls, content='', extra=''){
   return `<button class="mini-btn ${cls||'secondary'}" ${extra||''}>${content||''}${esc(label)}</button>`;
 }
+function kpiStrip(kpis){
+  if(!kpis) return '';
+  return Object.entries(kpis).map(([k,v])=>{
+    const lbl = fieldLabel(k);
+    const val = typeof v==='number'?fmt(v):String(v);
+    const ic = {'bookings':'booking','payments':'finance','users':'users','flights':'flight','wallet':'finance','stock':'file'}[k]||'chart';
+    return kpi(lbl, val, ic);
+  }).join('');
+}
 function actionLabel(a){
   if(a && a.label) return esc(a.label);
   if(typeof a==='string') return esc(a.charAt(0).toUpperCase()+a.slice(1));
