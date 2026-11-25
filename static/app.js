@@ -646,6 +646,12 @@ function kpiStrip(kpis){
     return kpi(lbl, val, ic);
   }).join('');
 }
+function recordModeToggle(mode){
+  const isCard = mode==='card';
+  return `<div class="record-mode-toggle"><span class="muted small">View:</span>
+    <button class="mini-btn ${isCard?'ghost':'secondary'}" data-action="record-mode" data-mode="list">List</button>
+    <button class="mini-btn ${isCard?'secondary':'ghost'}" data-action="record-mode" data-mode="card">Cards</button></div>`;
+}
 function actionLabel(a){
   if(a && a.label) return esc(a.label);
   if(typeof a==='string') return esc(a.charAt(0).toUpperCase()+a.slice(1));
