@@ -521,7 +521,8 @@ html[data-theme="dark"] .profile-avatar { color: #08111f; }
 /* Excel-like list view */
 .excel-grid { overflow: auto; max-height: min(70vh, 760px); }
 .excel-table { width: max-content; min-width: 100%; border-collapse: separate; border-spacing: 0; table-layout: fixed; font-size: 12px; }
-.excel-table th, .excel-table td { border-right: 1px solid #e2e8f0; border-bottom: 1px solid #e2e8f0; padding: 6px 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+.excel-table th, .excel-table td { border-right: 1px solid #e2e8f0; border-bottom: 1px solid #e2e8f0; padding: 6px 8px; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+.excel-table td.actions-cell { overflow: visible !important; max-width: none !important; white-space: nowrap !important; width: 90px; position: relative; z-index: 10; }
 .excel-table th { position: sticky; top: 0; z-index: 2; background: #f1f5f9; font-size: 11px; font-weight: 700; color: #334155; user-select: none; }
 .excel-table th:first-child, .excel-table td:first-child { border-left: 1px solid #e2e8f0; }
 .excel-table thead tr:first-child th { border-top: 1px solid #e2e8f0; }
