@@ -2089,15 +2089,15 @@ def init_db():
         ensure_travelers(conn)
         ensure_pss(conn)
         ensure_erp_pss_link(conn)
-        already = q(conn, "SELECT 1 FROM preferences WHERE key=? LIMIT 1", (SEED_RUN_KEY,), one=True)
+        already = q(conn, "SELECT 1 FROM preferences WHERE preference_key=? LIMIT 1", (SEED_RUN_KEY,), one=True)
         if not already:
             seed(conn)
             seed_accounting(conn)
             seed_setup(conn)
             seed_pss(conn)
             _bootstrap_admin_password(conn)
-            conn.execute("INSERT INTO preferences(key, value, created_at, updated_at) VALUES (?,?,?,?)",
-                         (SEED_RUN_KEY, '1', now_iso(), now_iso()))
+            conn.execute("INSERT INTO preferences(tenant_id, preference_key, preference_value, updated_at) VALUES (?,?,?,?)",
+                         (1, SEED_RUN_KEY, '1', now_iso()))
         else:
             _bootstrap_admin_password(conn)
 
