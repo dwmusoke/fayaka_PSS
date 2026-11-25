@@ -434,8 +434,8 @@ pre { white-space: pre-wrap; word-break: break-word; background: #f7f9fc; border
 .file-btn { position: relative; overflow: hidden; display: inline-flex; align-items: center; justify-content: center; }
 .file-btn input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
 .panel-records { overflow: visible; }
-.record-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; }
-.record-row { position: relative; display: flex; align-items: center; gap: 12px; min-height: 64px; padding: 12px 14px; border: 1px solid #e5ebf3; border-radius: 12px; background: #fff; box-shadow: 0 1px 2px rgba(15,23,42,.03); transition: background .14s ease, box-shadow .16s ease; }
+.record-list { display: flex; flex-direction: column; gap: 0; border: 1px solid #e5ebf3; border-radius: 12px; overflow: hidden; background: #fff; }
+.record-row { position: relative; display: flex; align-items: center; gap: 14px; padding: 10px 14px; border-bottom: 1px solid #edf2f7; background: #fff; transition: background .14s ease; }
 .record-row:first-child { border-radius: 12px 12px 0 0; }
 .record-row:last-child { border-bottom: 0; border-radius: 0 0 12px 12px; }
 .record-row::before { content: none; }
