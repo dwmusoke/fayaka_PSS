@@ -615,27 +615,14 @@ async function apiPut(path,id,data){
 function ctaBtn(label, action, id, extra='', cls='secondary', danger=false){
   return `<button class="mini-btn ${danger?'danger':''}${cls?` ${cls}`:''}" data-action="${esc(action)}" data-id="${esc(id)}"${extra?` data-extra="${esc(extra)}"`:''}>${esc(label)}</button>`;
 }
-function wireExcelResize(root){
-  const table = root.querySelector('.excel-table');
-  if(!table) return;
-  const ths = table.querySelectorAll('thead th.resizable-th');
-  ths.forEach((th, i)=>{
-    const handle = th.querySelector('.col-resize');
-    if(!handle) return;
-    handle.addEventListener('mousedown', (e)=>{
-      e.preventDefault(); e.stopPropagation();
-      const startX = e.pageX;
-      const startW = th.getBoundingClientRect().width;
-      handle.classList.add('resizing');
-      const onMove = (ev)=>{ const w = Math.max(60, startW + (ev.pageX - startX)); th.style.width = w+'px'; th.style.minWidth = w+'px'; th.style.maxWidth = w+'px'; };
-      const onUp = ()=>{ handle.classList.remove('resizing'); document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp);
-    });
-  });
-}
+
 function btn(label, cls, content='', extra=''){
   return `<button class="mini-btn ${cls||'secondary'}" ${extra||''}>${content||''}${esc(label)}</button>`;
+}
+function actionLabel(a){
+  if(a && a.label) return esc(a.label);
+  if(typeof a==='string') return esc(a.charAt(0).toUpperCase()+a.slice(1));
+  return esc(String(a||''));
 }
 function kpiStrip(kpis){
   if(!kpis) return '';
@@ -652,15 +639,27 @@ function recordModeToggle(mode){
     <button class="mini-btn ${isCard?'ghost':'secondary'}" data-action="record-mode" data-mode="list">List</button>
     <button class="mini-btn ${isCard?'secondary':'ghost'}" data-action="record-mode" data-mode="card">Cards</button></div>`;
 }
-function actionLabel(a){
-  if(a && a.label) return esc(a.label);
-  if(typeof a==='string') return esc(a.charAt(0).toUpperCase()+a.slice(1));
-  return esc(String(a||''));
+function wireExcelResize(root){
+  const table = root.querySelector('.excel-table');
+  if(!table) return;
+  table.querySelectorAll('thead th.resizable-th').forEach((th)=>{
+    const handle = th.querySelector('.col-resize');
+    if(!handle) return;
+    handle.addEventListener('mousedown', (e)=>{
+      e.preventDefault(); e.stopPropagation();
+      const startX = e.pageX;
+      const startW = th.getBoundingClientRect().width;
+      handle.classList.add('resizing');
+      const onMove = (ev)=>{ const w = Math.max(60, startW + (ev.pageX - startX)); th.style.width = w+'px'; th.style.minWidth = w+'px'; th.style.maxWidth = w+'px'; };
+      const onUp = ()=>{ handle.classList.remove('resizing'); document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+  });
 }
 function wireCellEditors(root){
   const table = root.querySelector('.excel-table');
   if(!table) return;
-  const view = table.closest('[data-view]')?.getAttribute('data-view') || root.getAttribute('data-view');
   table.querySelectorAll('td[data-field]:not(.actions-cell)').forEach(td=>{
     td.addEventListener('click', async ()=>{
       if(td.classList.contains('editing')) return;
@@ -719,9 +718,7 @@ async function renderList(name, el, pageArg){
   else if(d && Array.isArray(d.documents)) rows = d.documents;
   else if(d && Array.isArray(d.payments)) rows = d.payments;
   else if(d && typeof d==='object' && !Array.isArray(d)){
-    for(const k of Object.keys(d)){
-      if(Array.isArray(d[k]) && d[k].length){ rows = d[k]; break; }
-    }
+    for(const k of Object.keys(d)){ if(Array.isArray(d[k]) && d[k].length){ rows = d[k]; break; } }
   }
   const allRows = rows;
   const totalPages = Math.max(1, Math.ceil(allRows.length / PAGE_SIZE));
@@ -733,7 +730,7 @@ async function renderList(name, el, pageArg){
   const cols = rows.length?Object.keys(sample):[];
   const idKey = cols.find(c=>c==='id') || cols[0] || 'id';
   const headCols = cols.filter(c=>!FIELD_TYPES[c]?.startsWith('hidden') && c!==idKey);
-  const actions = rows.length?`<th style="width:170px">Actions</th>`:'';
+  const actions = rows.length?`<th class="actions-th">Actions</th>`:'';
   const head = `<tr>${headCols.map(c=>`<th class="resizable-th">${fieldLabel(c)}<span class="col-resize"></span></th>`).join('')}${actions}</tr>`;
   const defs = actionsFor(name);
   const modern = MODERN_RECORD_VIEWS.has(name);
@@ -760,10 +757,7 @@ async function renderList(name, el, pageArg){
   wireExcelResize(el);
   wireCellEditors(el);
   el.querySelectorAll('[data-action="record-mode"]').forEach(btn=>{
-    btn.onclick = ()=>{
-      try{ localStorage.setItem('pss-record-mode-'+name, btn.getAttribute('data-mode')); }catch(e){}
-      renderList(name, el, page);
-    };
+    btn.onclick = ()=>{ try{ localStorage.setItem('pss-record-mode-'+name, btn.getAttribute('data-mode')); }catch(e){} renderList(name, el, page); };
   });
   el.querySelectorAll('[data-action="edit"]').forEach(btn=>{
     btn.onclick = async ()=>{
@@ -771,26 +765,18 @@ async function renderList(name, el, pageArg){
       try{
         const row = await fetchRowDetail(path, id, rows.find(x=>String(x[idKey])===String(id)) || {}, idKey, d);
         const ucols = Object.keys(row).filter(c=>!FIELD_TYPES[c]?.startsWith('hidden') && c!==idKey && c!=='created_at' && c!=='updated_at');
-        const passwordField = name==='setup-users' ? `<div><label>New password</label>${inputFor('password','',false)}<div class="muted tiny">Leave blank to keep the current password. Must be at least 8 characters with upper, lower and digit.</div></div>` : '';
-        const uhtml = `<form id="f-edit-${id}" class="form-grid"><div class="form-cols">${ucols.map(k=>`<div><label>${fieldLabel(k)}</label>${inputFor(k,row[k],false)}</div>`).join('')}${passwordField}</div><div class="cta-row"><button type="submit" class="primary">${esc(editLabel)}</button><button type="button" class="secondary mini-btn" onclick="hideModal()">Cancel</button></div><div id="f-edit-${id}-msg" class="small"></div></form>`;
-        showModal(`${editLabel} #${id}`, uhtml);
-        const ef = $('#f-edit-'+id);
-        if(ef) ef.onsubmit = async (e)=>{
-          e.preventDefault();
-          const em = $(`#f-edit-${id}-msg`); if(em) em.textContent='';
-          const udata = Object.fromEntries(new FormData(ef).entries());
-          try{ await apiPut(path,id,udata); hideModal(); toast('Saved'); renderList(name, el); }
-          catch(err){ if(em){ em.textContent = err.message; em.className='small error'; } else toast(err.message,'error'); }
-        };
+        const passwordField = name==='setup-users' ? `<div><label>New password</label>${inputFor('password','',(row.password||''))}</div>` : '';
+        const editTitle = `Edit ${meta[0]}`;
+        showModal(editTitle, `<form id="f-edit-${name}" class="form-grid">${ucols.map(c=>`<div><label>${fieldLabel(c)}</label>${inputFor(c, row[c], row[c]||'')}</div>`).join('')}${passwordField}<div class="form-actions"><button type="submit" class="primary">Save</button>${btn('Cancel','ghost','','data-action="modal-close"')}</div></form>`);
+        const form = document.querySelector(`#f-edit-${name}`);
+        if(form) form.onsubmit = async (ev)=>{ ev.preventDefault(); const udata=Object.fromEntries(new FormData(form).entries()); try{ await apiPut(path,id,udata); hideModal(); toast('Saved'); renderList(name, el); }catch(err){ toast(err.message,'error'); } };
       }catch(err){ toast(err.message,'error'); }
     };
   });
   el.querySelectorAll('[data-action="delete"]').forEach(btn=>{
     btn.onclick = async ()=>{
       const id = btn.getAttribute('data-id');
-      if(!id || !confirm('Delete this record?')) return;
-      try{ await apiDelete(path,id); toast('Deleted'); renderList(name, el); }
-      catch(err){ toast(err.message,'error'); }
+      try{ await apiDelete(path,id); toast('Deleted'); renderList(name, el); }catch(err){ toast(err.message,'error'); }
     };
   });
   el.querySelectorAll('[data-action="menu"]').forEach(btn=>{
@@ -806,224 +792,90 @@ async function renderList(name, el, pageArg){
     btn.onclick = ()=>{
       const view = btn.getAttribute('data-view') || name;
       const id = btn.getAttribute('data-id');
-      const ref = btn.getAttribute('data-ref') || id;
-      $$('.action-menu').forEach(m=>m.classList.add('hidden'));
-      openShareDialog(view, id, ref);
+      shareFromAction(view, rows.find(x=>String(x[idKey])===String(id)) || {id}, d.share_base||'');
     };
   });
-  el.querySelectorAll('[data-action="page"]').forEach(btn=>{
-    btn.onclick = ()=> renderList(name, el, Number(btn.getAttribute('data-id')));
-  });
+  el.querySelectorAll('[data-page]').forEach(btn=>{ btn.onclick = ()=> renderList(name, el, Number(btn.getAttribute('data-page'))); });
   el.querySelectorAll('[data-action="docs"]').forEach(btn=>{
     btn.onclick = async ()=>{
       const id = btn.getAttribute('data-id');
-      const travelKinds = ['booking-confirmation','itinerary','journey-document'];
-      const kinds = travelKinds.map(k=>`<button class="mini-btn secondary" type="button" onclick="pickDoc('${esc(k)}','${esc(id)}')">${esc(DOC_KINDS[k][0])}</button>`).join('');
-      const pdfs = travelKinds.map(k=>`<a class="mini-btn secondary" target="_blank" href="/api/documents/pdf/${encodeURIComponent(k)}/${encodeURIComponent(id)}">${esc(DOC_KINDS[k][0])} PDF</a>`).join('');
-      showModal('Travel documents', `<div style="padding:10px;display:flex;gap:8px;flex-wrap:wrap">${kinds}${pdfs}</div>`);
+      try{
+        const dd = await api(`/api/documents?ref_id=${encodeURIComponent(id)}&view=${encodeURIComponent(name)}`);
+        const items = dd.documents || dd || [];
+        const body = Array.isArray(items)&&items.length?table(['id','doc_type','created_at'], items, (r,c)=>c==='doc_type'?statusBadge(r[c]):cellFor(c,r[c]), (r)=>`<button class="mini-btn" data-action="download-doc" data-id="${r.id}">Download</button>`):`<div class="empty">No documents found</div>`;
+        showModal('Documents', body);
+        $$('#modal-body [data-action="download-doc"]').forEach(b=>{ b.onclick = ()=> window.open(`/api/documents/${b.getAttribute('data-id')}/download`, '_blank'); });
+      }catch(err){ toast(err.message,'error'); }
     };
-  });
-  el.querySelectorAll('[data-action="download"]').forEach(btn=>{
-    btn.onclick = ()=> window.open(`/api/documents/${encodeURIComponent(btn.getAttribute('data-id'))}/download`,'_blank');
   });
   el.querySelectorAll('[data-action="open"]').forEach(btn=>{
-    btn.onclick = ()=>{
-      const row = rows.find(x=>String(x[idKey])===String(btn.getAttribute('data-id'))) || {};
-      window.open(row.url || `/share/${row.token||''}`,'_blank');
-    };
-  });
-  el.querySelectorAll('[data-action="copy"]').forEach(btn=>{
-    btn.onclick = ()=>{
-      const row = rows.find(x=>String(x[idKey])===String(btn.getAttribute('data-id'))) || {};
-      copyShare(row.url || `${location.origin}/share/${row.token||''}`);
-    };
+    btn.onclick = ()=>{ const row = rows.find(x=>String(x[idKey])===String(btn.getAttribute('data-id'))); if(row){ const ref=row.pnr||row.booking_ref||row.sale_no||row.id; showModal('Details', `<pre style="white-space:pre-wrap">${esc(JSON.stringify(row,null,2))}</pre>`); } };
   });
   el.querySelectorAll('[data-action="view"]').forEach(btn=>{
     btn.onclick = async ()=>{
       const id = btn.getAttribute('data-id');
       try{
-        const listRow = rows.find(x=>String(x[idKey])===String(id)) || {};
-        const detailRow = await fetchRowDetail(path, id, listRow, idKey, d);
-        const row = {...listRow, ...detailRow};
-        const fields = Object.keys(row).filter(k=>!FIELD_TYPES[k]?.startsWith('hidden'));
-        if(name==='crm'){
-          let linked = [];
-          try{
-            const td = await api('/api/travelers');
-            const all = Array.isArray(td) ? td : (td.travelers||td.data||[]);
-            linked = (all||[]).filter(t=>String(t.customer_id||'')===String(id) || (row.email && t.email===row.email)).slice(0,6);
-          }catch(e){}
-          const primary = linked[0] || {};
-          const address = [primary.address,primary.city,primary.state,primary.postal_code,primary.country].filter(Boolean).join(', ');
-          const info = [
-            ['Customer ID',id],['Type',row.type],['Company',row.company],['Email',row.email],['Phone',row.phone],
-            ['Loyalty ID',row.loyalty_id],['Source',row.source],['Bookings',row.bookings],
-            ['Lifetime spend',row.spend!==undefined&&row.spend!==null&&row.spend!==''?money(Number(row.spend||0)):''],
-            ['Nationality',primary.nationality],['ID / passport',primary.doc_no],['Date of birth',primary.dob],
-            ['Address',address],['Created',row.created_at]
-          ].filter(x=>x[1]!==undefined&&x[1]!==null&&x[1]!=='');
-          const wa = phoneDigits(row.phone);
-          const quick = [
-            row.email?`<a class="mini-btn primary" href="mailto:${esc(row.email)}">Email</a>`:'',
-            row.phone?`<a class="mini-btn" href="tel:${esc(phoneDigits(row.phone)||row.phone)}">Call</a>`:'',
-            wa?`<a class="mini-btn" href="https://wa.me/${wa}" target="_blank" rel="noopener">WhatsApp</a>`:'',
-            `<button type="button" class="mini-btn" id="copy-customer-${esc(id)}">Copy details</button>`,
-            `<button type="button" class="mini-btn" data-share-customer="${esc(id)}">Share profile</button>`
-          ].filter(Boolean).join('');
-          const linkedHtml = linked.length?`<div class="profile-linked"><h4>Linked travelers</h4>${linked.map(t=>`<div class="profile-contact"><b>${esc(t.full_name||t.display_name||[t.first_name,t.last_name].filter(Boolean).join(' ')||'Traveler')}</b><div class="muted tiny">${[t.email,t.phone||t.mobile,t.nationality,t.doc_no].filter(Boolean).map(v=>esc(v)).join(' A� ')||'No contact details'}</div></div>`).join('')}</div>`:'';
-          showModal(`Customer profile A� ${row.name||row.company||btn.getAttribute('data-ref')||id}`,
-            `<div class="profile-hero"><div class="profile-avatar">${esc(recordInitials(row.name||row.company||id))}</div>
-              <div class="profile-identity"><h3>${esc(row.name||row.company||'Customer')}</h3><div class="muted">${[row.company,row.type,row.loyalty_id].filter(Boolean).map(v=>esc(v)).join(' A� ')||'Customer profile'}</div></div>
-              ${row.status||row.type?statusBadge(row.status||row.type):''}</div>
-             <div class="profile-actions cta-row">${quick}</div>
-             <div class="profile-grid">${info.map(([k,v])=>`<div><label>${fieldLabel(k)}</label><div>${k==='Email'&&v?`<a href="mailto:${esc(v)}">${esc(v)}</a>`:(k==='Phone'&&v?`<a href="tel:${esc(phoneDigits(v)||v)}">${esc(v)}</a>`:esc(v))}</div></div>`).join('')}</div>
-             ${row.notes?`<div class="profile-notes"><label>Notes</label><div>${esc(row.notes)}</div></div>`:''}
-             ${linkedHtml}
-             <details class="profile-raw"><summary>All customer fields</summary><div class="form-cols" style="margin-top:12px">${fields.map(k=>`<div><label>${fieldLabel(k)}</label><div>${cellFor(k,row[k])}</div></div>`).join('')}</div></details>
-             <div class="cta-row"><button type="button" class="secondary" onclick="hideModal()">Close</button></div>`);
-          const cb = $('#copy-customer-'+id);
-          if(cb) cb.onclick = ()=>{
-            const text = info.map(([k,v])=>`${k}: ${v}`).join('\n');
-            if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(()=>toast('Customer details copied')).catch(()=>toast('Copy failed','error'));
-            else toast('Clipboard unavailable','error');
-          };
-          const sh = $('[data-share-customer="'+id+'"]');
-          if(sh) sh.onclick = ()=>openShareDialog('crm', String(id), String(row.name||row.company||id));
-          return;
-        }
-        if(name==='pss-bookings'){
-          let detail = {};
-          try{ detail = await api(`/api/pss/bookings/${encodeURIComponent(id)}`); }catch(e){ detail = {booking: row}; }
-          const b = detail.booking || row || {};
-          const payments = detail.payments || [];
-          const checkins = detail.checkins || [];
-          const events = detail.events || [];
-          const payRows = payments.length ? `<div class="table-wrap"><table><thead><tr><th>Payment</th><th>Date</th><th>Method</th><th>Amount</th><th>Status</th></tr></thead><tbody>${payments.map(p=>`<tr><td>${esc(p.payment_no||'-')}</td><td>${esc((p.paid_at||p.created_at||'').slice(0,10))}</td><td>${esc((p.method||'').replace(/_/g,' '))}</td><td>${money(Number(p.amount||0),p.currency||b.currency||defaultCurrency())}</td><td>${statusBadge(p.status||'')}</td></tr>`).join('')}</tbody></table></div>` : '<div class="muted tiny">No payments recorded.</div>';
-          const checkinRows = checkins.length ? `<div class="table-wrap"><table><thead><tr><th>Check-in</th><th>Seat</th><th>Bags</th><th>Status</th><th>Time</th></tr></thead><tbody>${checkins.map(c=>`<tr><td>${esc(c.checkin_no||'-')}</td><td>${esc(c.seat_no||'-')}</td><td>${esc(c.bag_count??0)}</td><td>${statusBadge(c.status||'')}</td><td>${esc((c.checked_in_at||c.created_at||'').slice(0,16).replace('T',' '))}</td></tr>`).join('')}</tbody></table></div>` : '<div class="muted tiny">No check-ins.</div>';
-          showModal(`Booking A� ${esc(b.pnr||btn.getAttribute('data-ref')||id)}`,
-            `<div class="form-cols">${fields.map(k=>`<div><label>${fieldLabel(k)}</label><div>${cellFor(k,b[k]!==undefined?b[k]:row[k])}</div></div>`).join('')}</div>
-             <div style="margin-top:14px;display:flex;justify-content:space-between;align-items:center;gap:8px"><h4 style="margin:0">Payments</h4><button type="button" class="mini-btn primary" id="booking-record-payment-${esc(id)}">Record payment</button></div>
-             <div id="booking-payments-${esc(id)}">${payRows}</div>
-             <div style="margin-top:14px"><h4>Check-ins</h4>${checkinRows}</div>
-             ${events.length?`<div style="margin-top:14px"><h4>Ticket events</h4><div class="table-wrap"><table><thead><tr><th>Status</th><th>Reason</th><th>Actor</th><th>Date</th></tr></thead><tbody>${events.map(ev=>`<tr><td>${statusBadge(ev.ticket_status||ev.previous_status||'')}</td><td>${esc(ev.reason||'-')}</td><td>${esc(ev.actor||'-')}</td><td>${esc((ev.created_at||'').slice(0,16).replace('T',' '))}</td></tr>`).join('')}</tbody></table></div></div>`:''}
-             <div class="cta-row"><button type="button" class="secondary" onclick="hideModal()">Close</button></div>`);
-          const payBtn = document.getElementById(`booking-record-payment-${id}`);
-          if(payBtn) payBtn.onclick = ()=>{
-            const cur = b.currency || defaultCurrency();
-            showModal('Record payment', `<form id="f-booking-pay-${esc(id)}" class="form-grid"><div class="form-cols">
-              <div><label>Booking ID</label><input name="booking_id" value="${esc(b.id||id)}" readonly></div>
-              <div><label>PNR</label><input name="pnr" value="${esc(b.pnr||'')}" readonly></div>
-              <div><label>Amount</label><input name="amount" type="number" step="0.01" min="0" value="${esc(b.total_amount||0)}" required></div>
-              <div><label>Currency</label><input name="currency" value="${esc(cur)}"></div>
-              <div><label>Method</label><select name="method"><option value="cash">Cash</option><option value="card">Card</option><option value="mobile_money">Mobile Money</option><option value="bank">Bank</option><option value="transfer">Transfer</option><option value="flutterwave">Flutterwave</option></select></div>
-              <div><label>Status</label><select name="status"><option value="captured">Captured</option><option value="paid">Paid</option><option value="pending">Pending</option></select></div>
-              <div><label>Reference</label><input name="reference"></div>
-              <div><label>Notes</label><input name="notes"></div>
-            </div><div class="cta-row"><button type="submit" class="primary">Save payment</button><button type="button" class="secondary mini-btn" onclick="hideModal()">Cancel</button></div><div id="f-booking-pay-${esc(id)}-msg" class="small"></div></form>`);
-            const f = document.getElementById(`f-booking-pay-${id}`);
-            if(f) f.onsubmit = async (e)=>{
-              e.preventDefault();
-              const msg = document.getElementById(`f-booking-pay-${id}-msg`);
-              if(msg){ msg.textContent=''; msg.className='small'; }
-              const data = Object.fromEntries(new FormData(f).entries());
-              data.booking_id = Number(data.booking_id||id);
-              data.amount = Number(data.amount||0);
-              try{
-                await api('/api/pss/payments',{method:'POST',body:JSON.stringify(data)});
-                hideModal(); toast('Payment recorded'); renderList(name, el);
-              }catch(err){ if(msg){ msg.textContent=err.message; msg.className='small error'; } else toast(err.message,'error'); }
-            };
-          };
-          return;
-        }
-        showModal(`${btn.textContent} · ${btn.getAttribute('data-ref')||id}`,
-          `<div class="form-cols">${fields.map(k=>`<div><label>${fieldLabel(k)}</label><div>${cellFor(k,row[k])}</div></div>`).join('')}</div>
-           <div class="cta-row"><button type="button" class="secondary" onclick="hideModal()">Close</button></div>`);
+        const row = await fetchRowDetail(path, id, rows.find(x=>String(x[idKey])===String(id)) || {}, idKey, d);
+        showModal(meta[0]+' detail', `<div class="detail-grid">${Object.entries(row).map(([k,v])=>`<div class="detail-row"><div class="detail-k">${fieldLabel(k)}</div><div class="detail-v">${cellFor(k,v)}</div></div>`).join('')}</div>`);
       }catch(err){ toast(err.message,'error'); }
     };
   });
   el.querySelectorAll('[data-action="duplicate"]').forEach(btn=>{
     btn.onclick = async ()=>{
       const id = btn.getAttribute('data-id');
-      try{
-        const row = await fetchRowDetail(path, id, rows.find(x=>String(x[idKey])===String(id)) || {}, idKey, d);
-        const clone = {...row};
-        ['id','tenant_id','created_at','updated_at','created_by','trace_id'].forEach(k=>delete clone[k]);
-        Object.keys(clone).forEach(k=>{
-          if((k.endsWith('_no')||k==='pnr'||k==='reference') && clone[k]) clone[k]=`${clone[k]}-C${Date.now().toString().slice(-4)}`;
-          if(k==='status') clone[k]='draft';
-        });
-        await api(createPath,{method:'POST',body:JSON.stringify(clone)});
-        toast('Duplicated'); renderList(name, el);
-      }catch(err){ toast(err.message,'error'); }
+      const row = rows.find(x=>String(x[idKey])===String(id));
+      if(!row){ toast('Row not found','error'); return; }
+      const copy = {...row}; delete copy.id; delete copy.created_at; delete copy.updated_at;
+      try{ await api(createPath, {method:'POST', body:JSON.stringify(copy)}); toast('Duplicated'); renderList(name, el); }catch(err){ toast(err.message,'error'); }
     };
-  });
-  ['pdf','receipt','statement'].forEach(action=>{
-    el.querySelectorAll(`[data-action="${action}"]`).forEach(btn=>{
-      btn.onclick = ()=>{
-        const id = btn.getAttribute('data-id');
-        const row = rows.find(x=>String(x[idKey])===String(id)) || {};
-        const target = pdfTarget(name, row, id, btn.getAttribute('data-pdf') || action);
-        if(!target.id){ toast('No linked document available','error'); return; }
-        window.open(`/api/documents/pdf/${encodeURIComponent(target.kind)}/${encodeURIComponent(target.id)}`,'_blank');
-      };
-    });
   });
   el.querySelectorAll('[data-action="ticket"]').forEach(btn=>{
-    btn.onclick = async ()=>{
-      try{ await api(`/api/pss/bookings/${encodeURIComponent(btn.getAttribute('data-id'))}/ticket`,{method:'POST',body:'{}'}); toast('Ticketed'); renderList(name, el); }
-      catch(err){ toast(err.message,'error'); }
-    };
+    btn.onclick = async ()=>{ try{ await api(`/api/pss/bookings/${encodeURIComponent(btn.getAttribute('data-id'))}/ticket`,{method:'POST',body:'{}'}); toast('Ticketed'); renderList(name, el); }catch(err){ toast(err.message,'error'); } };
   });
-  Object.keys(ACTION_STATUS).forEach(action=>{
+  ['checkin','board','unboard','deplane'].forEach(action=>{
     el.querySelectorAll(`[data-action="${action}"]`).forEach(btn=>{
       btn.onclick = async ()=>{
         const id = btn.getAttribute('data-id');
-        const status = ACTION_STATUS[action];
-        if(!confirm(`${esc(btn.textContent)} this record?`)) return;
         try{
-          if(name==='pss-bookings' && action==='cancel') await api(`/api/pss/bookings/${encodeURIComponent(id)}/status`,{method:'POST',body:JSON.stringify({status})});
-          else {
-            const field = name==='bank-transactions' ? 'reconciliation_status' : 'status';
-            await apiPut(path,id,{[field]:status});
-          }
+          const statusMap={checkin:'checked_in',board:'boarded',unboard:'checked_in',deplane:'deplaned'};
+          await apiPut(`/api/pss/bookings`, id, {booking_status: statusMap[action]});
           toast(`${btn.textContent} complete`); renderList(name, el);
         }catch(err){ toast(err.message,'error'); }
       };
     });
   });
-  el.querySelectorAll(`[data-action="create-${esc(name)}"]`).forEach(btn=>{
-    btn.onclick = ()=>{
-      showModal(createLabel, createForm);
-      const form = $(`#f-create-${esc(name)}`);
-      if(!form) return;
-      form.onsubmit = async (e)=>{
-        e.preventDefault();
-        const msg = $(`#f-create-${esc(name)}-msg`); if(msg){ msg.textContent=''; msg.className='small'; }
-          const data = schemaPayload(form,createFields);
-          try{
-            await api(createPath,{method:'POST',body:JSON.stringify(data)});
-          hideModal(); toast('Created'); renderList(name, el);
-        }catch(err){ if(msg){ msg.textContent = err.message; msg.className='small error'; } else toast(err.message,'error'); }
-      };
+  el.querySelectorAll('[data-action="item"]').forEach(btn=>{
+    btn.onclick = async ()=>{
+      const itemAction = btn.getAttribute('data-item-action');
+      const id = btn.getAttribute('data-id');
+      const row = rows.find(x=>String(x[idKey])===String(id)) || {id};
+      if(itemAction==='view'){
+        try{ const detail = await fetchRowDetail(path, id, row, idKey, d); showModal(meta[0]+' detail', `<div class="detail-grid">${Object.entries(detail).map(([k,v])=>`<div class="detail-row"><div class="detail-k">${fieldLabel(k)}</div><div class="detail-v">${cellFor(k,v)}</div></div>`).join('')}</div>`); }catch(err){ toast(err.message,'error'); }
+        return;
+      }
+      if(itemAction==='edit'){ el.querySelector(`[data-action="edit"][data-id="${CSS.escape(id)}"]`)?.click(); return; }
+      if(itemAction==='delete'){ el.querySelector(`[data-action="delete"][data-id="${CSS.escape(id)}"]`)?.click(); return; }
+      if(itemAction==='share'){ shareFromAction(name, row, d.share_base||''); return; }
+      if(itemAction==='duplicate'){ el.querySelector(`[data-action="duplicate"][data-id="${CSS.escape(id)}"]`)?.click(); return; }
+      if(itemAction==='ticket'){ el.querySelector(`[data-action="ticket"][data-id="${CSS.escape(id)}"]`)?.click(); return; }
+      if(itemAction==='pdf'||itemAction==='receipt'){ const pdf = btn.getAttribute('data-pdf')||itemAction; window.open(`/api/documents/${pdf}?id=${encodeURIComponent(id)}`, '_blank'); return; }
+      if(itemAction==='post'){ try{ await api(path+'/'+encodeURIComponent(id)+'/post',{method:'POST',body:'{}'}); toast('Posted'); renderList(name,el); }catch(err){ toast(err.message,'error'); } return; }
+      if(itemAction==='refund'){ try{ await api(path+'/'+encodeURIComponent(id)+'/refund',{method:'POST',body:'{}'}); toast('Refunded'); renderList(name,el); }catch(err){ toast(err.message,'error'); } return; }
+      toast(`${itemAction} not implemented for this view`, 'error');
     };
   });
+  el.querySelectorAll('[data-action="new-record"]').forEach(btn=>{
+    btn.onclick = ()=>{
+      const flds = fieldsFor(name);
+      showModal(`New ${meta[0]}`, `<form id="f-create-${name}" class="form-grid">${flds.map(c=>`<div><label>${fieldLabel(c)}</label>${inputFor(c,'','')}</div>`).join('')}<div class="form-actions"><button type="submit" class="primary">Create</button>${btn('Cancel','ghost','','data-action="modal-close"')}</div></form>`);
+      const form = document.querySelector(`#f-create-${name}`);
+      if(form) form.onsubmit = async (ev)=>{ ev.preventDefault(); try{ await api(createPath,{method:'POST',body:JSON.stringify(Object.fromEntries(new FormData(form).entries()))}); hideModal(); toast('Created'); renderList(name,el); }catch(err){ toast(err.message,'error'); } };
+    };
+  });
+  el.querySelectorAll('[data-action="refresh-view"]').forEach(btn=>{ btn.onclick = ()=> renderList(name,el); });
+  el.querySelectorAll('[data-action="modal-close"]').forEach(btn=>{ btn.onclick = ()=> hideModal(); });
 }
 
-/* ========================= CUSTOMER ENGAGEMENT / DOCUMENTS ========================= */
-const DOC_KINDS = {
-  'booking-confirmation':['Booking Confirmation','Confirmed reservation and e-ticket details'],
-  'itinerary':['Itinerary','Journey schedule, segments and travel plan'],
-  'invoice':['Invoice','Amounts, taxes and payment summary'],
-  'receipt':['Payment Receipt','Payment confirmation and allocation summary'],
-  'credit-note':['Credit Note','Refund or adjustment credit'],
-  'quotation':['Quotation','Price quote and validity'],
-  'statement':['Statement','Account activity and balance'],
-  'journey-document':['Journey Document','Complete travel wallet: itinerary, tickets and services'],
-  'boardingpass':['Boarding Pass','IATA boarding pass with BCBP and verification barcode'],
-  'baggagetag':['Baggage Tag','IATA baggage tag with routing and tracking barcode'],
-  'upliftcoupon':['Uplift Coupon','Excess baggage uplift charge and payment coupon']
-};
 function pdfKindForEntity(entityType){
   return ({invoice:'invoice',payment:'receipt',pss_payment:'receipt',credit_note:'credit-note',estimate:'quotation',customer:'statement',traveler:'statement',pss_booking:'itinerary',booking:'booking-confirmation',pss_checkin:'boardingpass'})[entityType] || 'invoice';
 }
