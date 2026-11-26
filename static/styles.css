@@ -541,3 +541,12 @@ html[data-theme="dark"] .profile-avatar { color: #08111f; }
 /* Inline cell editing */
 .excel-table td.editing { background: #fffde7; position: relative; z-index: 5; }
 .excel-table td.editing .cell-edit { border: 1px solid #2563eb; border-radius: 4px; outline: none; }
+
+
+/* Modal body & detail view popup */
+.modal-body { max-height: 75vh; overflow-y: auto; padding-top: 4px; }
+.detail-grid { display: grid; grid-template-columns: 1fr 2fr; gap: 8px 12px; border: 1px solid #e5ebf3; border-radius: 10px; padding: 14px; background: #fff; }
+.detail-k { grid-column: 1; color: #64748b; font-size: 12px; font-weight: 700; padding-top: 4px; }
+.detail-v { grid-column: 2; font-size: 13px; color: #334155; padding-top: 4px; word-break: break-word; }
+.detail-row { border-bottom: 1px solid #f1f5f9; padding: 4px 0; }
+.detail-row:last-child { border-bottom: 0; }

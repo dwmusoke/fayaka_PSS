@@ -1097,6 +1097,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.api_pss_bookings(tenant_id, 'GET', sess=sess)
             if path == '/api/pss/bookings' and method == 'POST':
                 return self.api_pss_bookings(tenant_id, 'POST', user_id=user_id, sess=sess)
+            if path.startswith('/api/pss/bookings/') and method in ('PUT','PATCH'):
+                return self.api_pss_bookings(tenant_id, 'PUT', bid=path.rsplit('/',1)[-1], user_id=user_id, sess=sess)
             if path == '/api/pss/seat-holds' and method == 'GET':
                 return self.api_pss_seat_holds(tenant_id)
             if path == '/api/pss/seat-holds' and method == 'POST':
