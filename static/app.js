@@ -603,6 +603,9 @@ function cellFor(key, val){
   if(key==='status') return statusBadge(val);
   if(key==='is_active'||key==='active') return (val?`<span class="badge good">active</span>`:`<span class="badge bad">inactive</span>`);
   if(key==='action') return (val===null||val===undefined||val==='') ? `<span class="muted">-</span>` : String(val);
+  if(/^(id$|pnr|ticket_?no|ticket_number|doc_?no|invoice_?no|order_?no|sale_?no|tracking_?no|ref|locator|number)$/i.test(key)){
+    return `<a class="id-link" href="#" data-key="${esc(key)}" data-val="${esc(String(val))}">${esc(val)}</a>`;
+  }
   if(val===null||val===undefined||val==='') return `<span class="muted">-</span>`;
   return esc(val);
 }
@@ -874,6 +877,24 @@ async function renderList(name, el, pageArg){
   });
   el.querySelectorAll('[data-action="refresh-view"]').forEach(btn=>{ btn.onclick = ()=> renderList(name,el); });
   el.querySelectorAll('[data-action="modal-close"]').forEach(btn=>{ btn.onclick = ()=> hideModal(); });
+
+  if(!el._idLinkListener){
+    el._idLinkListener = true;
+    el.addEventListener('click', async (e)=>{
+      const a = e.target.closest('a.id-link');
+      if(!a) return;
+      e.preventDefault();
+      const tr = a.closest('tr[data-id]');
+      if(!tr) return;
+      const id = tr.getAttribute('data-id');
+      const p = tr.getAttribute('data-path') || path;
+      const view = tr.getAttribute('data-view') || name;
+      try{
+        const row = await fetchRowDetail(p, id, rows.find(x=>String(x[idKey])===String(id)) || {}, idKey, d);
+        showModal(view+' detail', `<div class="detail-grid">${Object.entries(row).map(([k,v])=>`<div class="detail-row"><div class="detail-k">${fieldLabel(k)}</div><div class="detail-v">${cellFor(k,v)}</div></div>`).join('')}</div>`);
+      }catch(err){ toast(err.message||String(err),'error'); }
+    });
+  }
 }
 
 function pdfKindForEntity(entityType){
