@@ -1287,6 +1287,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.api_notification_read(tenant_id, sess=sess)
             if path == '/api/admin/overview' and method == 'GET':
                 return self.api_admin_overview(tenant_id)
+            if path == '/api/admin/tenants' and method == 'GET':
+                return self.api_admin_tenants(sess)
             if path == '/api/billing/overview' and method == 'GET':
                 return self.api_billing_overview(tenant_id)
             if path == '/api/billing/gateway' and method == 'POST':
@@ -2211,6 +2213,19 @@ class Handler(BaseHTTPRequestHandler):
             gw_safe['webhook_secret_set'] = bool(gw.get('webhook_secret'))
             gw_safe['config'] = gw.get('config') or {}
         return self._json({'plan': plan, 'usage': usage, 'subscription': sub, 'plans': plans, 'branches': branches, 'users': users, 'audits': audits, 'billing_gateway': gw_safe, 'subscription_invoices': sub_invoices})
+
+    def api_admin_tenants(self, sess=None):
+        role = role_group((sess or {}).get('role'))
+        if role != 'airline_admin':
+            return self._json({'error': 'Access denied'}, 403)
+        with db() as conn:
+            rows = q(conn, """SELECT t.id, t.code, t.name, t.status, t.created_at,
+                              (SELECT COUNT(*) FROM users u WHERE u.tenant_id=t.id) users,
+                              (SELECT COUNT(*) FROM pss_flights f WHERE f.tenant_id=t.id) flights,
+                              (SELECT p.code FROM subscriptions s JOIN plans p ON p.id=s.plan_id
+                                WHERE s.tenant_id=t.id AND s.status='active' ORDER BY s.id DESC LIMIT 1) plan_code
+                              FROM tenants t ORDER BY t.id""")
+        return self._json({'tenants': rows})
 
     def api_billing_overview(self, tenant_id):
         with db() as conn:

@@ -208,6 +208,7 @@ const viewMeta = {
   revenue: ['Revenue Dashboard','Gross revenue, cash collected, ancillary sales, refunds and channel performance','Finance'],
   developer: ['Developer Center','Partner API keys, webhooks, delivery logs and API documentation','Control Center'],
   onboarding: ['Airline Onboarding','Guided setup for a new airline tenant and readiness checklist','Setup'],
+  airlines: ['Airlines / Tenants','All provisioned airline tenants, codes, plans and usage','Setup'],
   refunds: ['Refund Management','GDS/LCC refunds, policy checks, auto-void and refund tracking','Airline Finance'],
   coupons: ['Coupon Reporting','Coupon creation, cancellations and pre-billing control','Airline Finance'],
   loyalty: ['Loyalty Reporting','Frequent traveler IDs, coupon activity and customer value','Airline Finance'],
@@ -2773,6 +2774,31 @@ async function render_developer(el){
   $$('.dev-retry',el).forEach(b=>b.onclick=async()=>{ try{ await api(`/api/developer/webhooks/${b.dataset.id}/retry`,{method:'POST',body:'{}'}); toast('Webhook retried'); render_developer(el); }catch(err){ toast(err.message,'error'); } });
 }
 
+async function render_airlines(el){
+  const meta = viewMeta.airlines;
+  try{
+    const d = await api('/api/admin/tenants');
+    const tenants = d.tenants||[];
+    const rows = tenants.map(t=>`<tr>
+      <td>${esc(t.id)}</td><td><b>${esc(t.code||'-')}</b></td><td>${esc(t.name||'-')}</td>
+      <td>${statusBadge(t.status||'active')}</td><td>${esc(t.plan_code||'-')}</td>
+      <td>${fmt(t.users||0)}</td><td>${fmt(t.flights||0)}</td><td>${esc((t.created_at||'').slice(0,10))}</td>
+      <td><button class="mini-btn secondary" data-tenant-login="${esc(t.code)}">Switch login</button></td>
+    </tr>`).join('')||'<tr><td colspan="9" class="empty">No airlines provisioned yet</td></tr>';
+    el.innerHTML = `${pageHead(meta[0], meta[1], `<button class="mini-btn primary" id="airlines-go-onboarding">+ Provision airline</button>`)}
+      <div class="grid kpi-row" style="margin-bottom:16px">${kpi('Airlines',tenants.length,'users')}${kpi('Active',tenants.filter(t=>t.status==='active').length,'task')}${kpi('Total users',tenants.reduce((s,t)=>s+Number(t.users||0),0),'users')}${kpi('Total flights',tenants.reduce((s,t)=>s+Number(t.flights||0),0),'booking')}</div>
+      <div class="panel"><div class="panel-head"><h3>Provisioned airline tenants</h3><span class="badge info">${tenants.length}</span></div><div class="panel-body">
+        <div class="table-wrap"><table><thead><tr><th>ID</th><th>Code</th><th>Name</th><th>Status</th><th>Plan</th><th>Users</th><th>Flights</th><th>Created</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+      </div></div>`;
+    $('#airlines-go-onboarding',el).onclick=()=>setView('onboarding');
+    $$('[data-tenant-login]',el).forEach(b=>b.onclick=()=>{
+      const code=b.getAttribute('data-tenant-login');
+      const form=$('#login-form');
+      if(form && form.elements.tenant){ form.elements.tenant.value=code; form.elements.username?.focus(); toast(`Tenant set to ${code} — enter admin credentials`); }
+      else toast(`Use tenant code ${code} on the login screen`);
+    });
+  }catch(e){ el.innerHTML=`${pageHead(meta[0],meta[1],'')}<div class="panel"><div class="panel-body error">${esc(e.message||String(e))}</div></div>`; }
+}
 async function render_onboarding(el){
   const d = await api('/api/onboarding/status');
   const rawNotes = d.progress?.data_json;
