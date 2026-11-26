@@ -490,41 +490,17 @@ def _session_expiry(days=90):
 def _invalidate_user_sessions(user_id):
     if not user_id:
         return
-    if USING_POSTGRES:
-        try:
-            with db() as conn:
-                db_delete_user_sessions(conn, user_id)
-        except Exception:
-            pass
-        return
+    try:
+        with db() as conn:
+            db_delete_user_sessions(conn, user_id)
+    except Exception:
+        pass
     with SESS_LOCK:
         for sid in [t for t, s in SESSIONS.items() if s.get('user_id') == user_id]:
             SESSIONS.pop(sid, None)
 
 
 def get_session(handler):
-    if USING_POSTGRES:
-        try:
-            cookie = SimpleCookie(handler.headers.get('Cookie'))
-        except Exception:
-            return None
-        if 'sid' not in cookie:
-            return None
-        sid = cookie['sid'].value
-        now = time.time()
-        with db() as conn:
-            row = db_get_session(conn, sid)
-            if not row:
-                return None
-            import json as _json
-            sess = _json.loads(row['data']) if isinstance(row['data'], str) else dict(row)
-            if sess.get('client_hash') and sess['client_hash'] != _client_hash(handler):
-                pass  # allow session across proxy IP changes on Railway
-            sess['last_activity'] = now
-            db_set_session(conn, sid, sess.get('tenant_id'), sess.get('user_id'),
-                           _json.dumps(sess), sess.get('expires_at', now + SESSION_TTL),
-                           sess.get('created_at', now_iso()), now_iso())
-            return sess
     try:
         cookie = SimpleCookie(handler.headers.get('Cookie'))
     except Exception:
@@ -533,6 +509,36 @@ def get_session(handler):
         return None
     sid = cookie['sid'].value
     now = time.time()
+    import json as _json
+    sess = None
+    try:
+        with db() as conn:
+            row = db_get_session(conn, sid)
+        if row:
+            sess = _json.loads(row['data']) if isinstance(row['data'], str) else dict(row)
+    except Exception:
+        sess = None
+    if sess:
+        if sess.get('expires_at') is not None and now >= float(sess.get('expires_at')):
+            try:
+                with db() as conn:
+                    db_delete_session(conn, sid)
+            except Exception:
+                pass
+            return None
+        if now - float(sess.get('last_activity') or 0) > SESSION_IDLE:
+            return None
+        sess['last_activity'] = now
+        try:
+            with db() as conn:
+                db_set_session(conn, sid, sess.get('tenant_id'), sess.get('user_id'),
+                               _json.dumps(sess), sess.get('expires_at', now + SESSION_TTL),
+                               sess.get('created_at', now_iso()), now_iso())
+        except Exception:
+            pass
+        with SESS_LOCK:
+            SESSIONS[sid] = sess
+        return sess
     with SESS_LOCK:
         sess = SESSIONS.get(sid)
         if not sess:
@@ -541,9 +547,6 @@ def get_session(handler):
             SESSIONS.pop(sid, None)
             return None
         if now - float(sess.get('last_activity') or 0) > SESSION_IDLE:
-            SESSIONS.pop(sid, None)
-            return None
-        if sess.get('client_hash') and sess['client_hash'] != _client_hash(handler):
             SESSIONS.pop(sid, None)
             return None
         sess['last_activity'] = now
@@ -1523,13 +1526,15 @@ class Handler(BaseHTTPRequestHandler):
                 'agency_id': u.get('agency_id'), 'station_code': u.get('station_code'), 'branch_id': u.get('branch_id'),
                 'client_hash': _client_hash(self), 'issued_at': now, 'last_activity': now,
                 'expires_at': now + SESSION_TTL}
-        if USING_POSTGRES:
-            import json as _json
-            db_set_session(conn, token, t['id'], u['id'], _json.dumps(sess), now + SESSION_TTL,
-                           now_iso(), now_iso())
-        else:
-            with SESS_LOCK:
-                SESSIONS[token] = sess
+        import json as _json
+        try:
+            with db() as conn:
+                db_set_session(conn, token, t['id'], u['id'], _json.dumps(sess), now + SESSION_TTL,
+                               now_iso(), now_iso())
+        except Exception:
+            pass
+        with SESS_LOCK:
+            SESSIONS[token] = sess
         flags = '; Secure' if _use_secure_cookie(self) else ''
         headers = {'Set-Cookie': f'sid={token}; Path=/; HttpOnly; SameSite=Lax{flags}'}
         return self._json({'ok': True, 'session': sess}, 200, headers=headers)
@@ -1560,15 +1565,13 @@ class Handler(BaseHTTPRequestHandler):
         cookie = SimpleCookie(self.headers.get('Cookie'))
         sid = cookie['sid'].value if 'sid' in cookie else None
         if sid:
-            if USING_POSTGRES:
-                try:
-                    with db() as conn:
-                        db_delete_session(conn, sid)
-                except Exception:
-                    pass
-            else:
-                with SESS_LOCK:
-                    SESSIONS.pop(sid, None)
+            try:
+                with db() as conn:
+                    db_delete_session(conn, sid)
+            except Exception:
+                pass
+            with SESS_LOCK:
+                SESSIONS.pop(sid, None)
         flags = '; Secure' if _use_secure_cookie(self) else ''
         headers = {'Set-Cookie': f'sid=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax{flags}'}
         return self._json({'ok': True}, 200, headers=headers)
