@@ -604,3 +604,5 @@ html[data-theme="dark"] .profile-avatar { color: #08111f; }
 .json-block { display: inline-block; max-width: 100%; }
 .json-block summary { cursor: pointer; font-size: 11px; color: #0e7490; font-weight: 700; }
 .json-block pre { margin: 6px 0 0; padding: 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 11px; line-height: 1.45; overflow: auto; max-height: 260px; white-space: pre-wrap; word-break: break-word; }
+.doc-hub-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid #e2e8f0; border-radius: 10px; background: #fff; margin-bottom: 8px; flex-wrap: wrap; }
+.doc-hub-row .cta-row { display: flex; gap: 6px; flex-wrap: wrap; }

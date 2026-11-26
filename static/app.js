@@ -257,10 +257,10 @@ const VIEW_ACTIONS = {
   'bank-transactions':[{label:'View',action:'view'},{label:'Match',action:'match'},{label:'Reconcile',action:'reconcile'},{label:'Share',action:'share'}],
   reconciliations:[{label:'Review',action:'view'},{label:'Match',action:'match'},{label:'Post',action:'post'},{label:'Share',action:'share'}],
   orders:[{label:'View',action:'view'},{label:'Edit',action:'edit'},{label:'Duplicate',action:'duplicate'},{label:'Invoice',action:'pdf',pdf:'order'},{label:'Share',action:'share'}],
-  'pss-bookings':[{label:'View',action:'view'},{label:'Edit',action:'edit'},{label:'Ticket',action:'ticket'},{label:'Documents',action:'docs'},{label:'Share',action:'share'},{label:'Cancel',action:'cancel',danger:true}],
+  'pss-bookings':[{label:'View',action:'view'},{label:'Edit',action:'edit'},{label:'Ticket',action:'ticket'},{label:'Itinerary',action:'pdf',pdf:'itinerary'},{label:'Booking confirmation',action:'pdf',pdf:'booking-confirmation'},{label:'Travel documents',action:'travel-docs'},{label:'Documents',action:'docs'},{label:'Share',action:'share'},{label:'Cancel',action:'cancel',danger:true}],
   'pss-payments':[{label:'View',action:'view'},{label:'Receipt',action:'receipt',pdf:'receipt'},{label:'Edit',action:'edit'},{label:'Share',action:'share'},{label:'Refund',action:'refund',danger:true}],
-  crm:[{label:'View',action:'view'},{label:'Edit',action:'edit'},{label:'Statement',action:'statement',pdf:'customer'},{label:'Share',action:'share'}],
-  travelers:[{label:'View',action:'view'},{label:'Edit',action:'edit'},{label:'Statement',action:'statement',pdf:'traveler'},{label:'Share',action:'share'}]
+  crm:[{label:'View',action:'view'},{label:'Edit',action:'edit'},{label:'Statement',action:'statement',pdf:'customer'},{label:'Travel documents',action:'travel-docs'},{label:'Share',action:'share'}],
+  travelers:[{label:'View',action:'view'},{label:'Edit',action:'edit'},{label:'Statement',action:'statement',pdf:'traveler'},{label:'Travel documents',action:'travel-docs'},{label:'Share',action:'share'}]
 };
 const MODERN_RECORD_VIEWS = new Set(['invoicing','crm','orders','payments','pss-payments','refunds','suppliers','backoffice']);
 const MODERN_RECORD_SPECS = {
@@ -949,9 +949,11 @@ async function renderList(name, el, pageArg){
       if(['pdf','receipt','statement','boardingpass','itinerary','voucher','booking-confirmation','credit-note','quotation','journeypass'].includes(itemAction) || btn.getAttribute('data-pdf')){ const pdf = btn.getAttribute('data-pdf')||itemAction; openPdfViewer(`/api/documents/pdf/${pdf}/${encodeURIComponent(id)}`, row.ref||row.title||pdf.replace(/-/g,' ').replace(/\b\w/g,c=>c.toUpperCase())); return; }
       if(itemAction==='post'){ try{ await api(path+'/'+encodeURIComponent(id)+'/post',{method:'POST',body:'{}'}); toast('Posted'); renderList(name,el); }catch(err){ toast(err.message,'error'); } return; }
       if(itemAction==='refund'){ openRefund(id); return; }
+      if(itemAction==='travel-docs'){ openBookingDocuments(name, row); return; }
       toast(`${itemAction} not implemented for this view`, 'error');
     };
   });
+  el.querySelectorAll('[data-action="travel-docs"]').forEach(b=>{ b.onclick=()=>openBookingDocuments(name, rows.find(x=>String(x[idKey])===String(b.getAttribute('data-id')))||{id:b.getAttribute('data-id')}); });
   ['pdf','receipt','statement','boardingpass','itinerary','voucher','booking-confirmation','credit-note','quotation','journeypass'].forEach(a=>{
     el.querySelectorAll(`[data-action="${a}"]`).forEach(btn=>{
       btn.onclick = ()=>{
@@ -1161,6 +1163,70 @@ function closePdfViewer(){
   m.classList.add('hidden');
   const frame = $('#admin-pdf-frame', m);
   if(frame) frame.src = 'about:blank';
+}
+function fileToBase64(file){
+  return new Promise((resolve,reject)=>{
+    const r=new FileReader();
+    r.onload=()=>resolve(String(r.result||'').split(',')[1]||'');
+    r.onerror=()=>reject(new Error('Could not read file'));
+    r.readAsDataURL(file);
+  });
+}
+async function savePdfToHub(kind,id,title){
+  const res=await fetch(`/api/documents/pdf/${kind}/${encodeURIComponent(id)}`,{credentials:'same-origin'});
+  if(!res.ok) throw new Error('Could not generate PDF');
+  const bytes=new Uint8Array(await res.arrayBuffer());
+  let bin=''; for(let i=0;i<bytes.length;i++) bin+=String.fromCharCode(bytes[i]);
+  await api('/api/documents',{method:'POST',body:JSON.stringify({entity_type:'pss_booking',entity_id:id,title,category:'travel',file_name:`${kind}-${id}.pdf`,mime_type:'application/pdf',file_base64:btoa(bin),size:bytes.length,visibility:'internal'})});
+}
+async function openBookingDocuments(view,row){
+  const id=row.id;
+  const pnr=row.pnr||row.booking_ref||'';
+  const isBooking=['pss-bookings','orders','pss-checkins','pss-eticket-tracker','pss-direct'].includes(view);
+  const qs=new URLSearchParams();
+  if(isBooking&&id) qs.set('booking_id',id);
+  if(pnr) qs.set('pnr',pnr);
+  if(!isBooking&&id) qs.set('customer_id',id);
+  showModal('Travel documents', `<div class="panel"><div class="panel-body" id="travel-docs-body"><div class="muted small">Loading documents...</div></div></div>`);
+  const body=document.getElementById('travel-docs-body'); if(!body) return;
+  let docs=[];
+  try{ docs=(await api('/api/pss/travel-documents?'+qs.toString())).documents||[]; }catch(err){ toast(err.message,'error'); }
+  const pdfKinds=isBooking?[['itinerary','Itinerary'],['booking-confirmation','Booking confirmation'],['journeypass','Journey document']]:[];
+  const genHtml=pdfKinds.map(([k,l])=>`<div class="doc-hub-row"><div><b>${esc(l)}</b><div class="muted tiny">PDF · branded · ready to share</div></div><div class="cta-row"><button class="mini-btn secondary" data-gen-view="${k}">View PDF</button><button class="mini-btn" data-gen-save="${k}">Save to Hub</button><button class="mini-btn secondary" data-gen-share="${k}">Share</button></div></div>`).join('')||'<div class="muted small">Open from a booking to generate travel PDFs.</div>';
+  const docRows=docs.map(d=>{
+    const exp=d.expiry_date?String(d.expiry_date).slice(0,10):'';
+    const soon=exp && (new Date(exp+'T23:59:59').getTime() <= Date.now()+30*86400000);
+    return `<tr><td>${esc(d.title||d.doc_type||'-')}</td><td>${esc(d.doc_type||'-')}</td><td>${esc(d.doc_no||'-')}</td><td>${exp?`<span class="badge ${soon?'warn':'good'}">${esc(exp)}</span>`:'<span class="muted">-</span>'}</td><td>${d.has_file?`<button class="mini-btn secondary" data-doc-view="${d.id}">View</button> <button class="mini-btn" data-doc-dl="${d.id}">Download</button>`:'<span class="muted tiny">No file</span>'} <button class="mini-btn secondary" data-doc-exp="${d.id}">Edit expiry</button> <button class="mini-btn secondary danger" data-doc-del="${d.id}">Delete</button></td></tr>`;
+  }).join('')||'<tr><td colspan="5" class="empty">No travel documents yet</td></tr>';
+  const payload={booking_id:isBooking?id:'',pnr};
+  body.innerHTML=`<h4 class="doc-section-title">Generated travel PDFs</h4>${genHtml}
+    <div class="cta-row" style="margin-top:10px"><button class="mini-btn primary" id="td-upload">+ Add travel document</button><button class="mini-btn secondary" id="td-remind">Send expiry reminders</button></div>
+    <h4 class="doc-section-title" style="margin-top:16px">Uploaded documents &amp; expiry</h4>
+    <div class="table-wrap"><table><thead><tr><th>Title</th><th>Type</th><th>Doc no</th><th>Expiry</th><th>Actions</th></tr></thead><tbody>${docRows}</tbody></table></div>`;
+  const refresh=()=>openBookingDocuments(view,row);
+  $$('[data-gen-view]',body).forEach(b=>b.onclick=()=>openPdfViewer(`/api/documents/pdf/${b.getAttribute('data-gen-view')}/${encodeURIComponent(id)}`, b.textContent));
+  $$('[data-gen-save]',body).forEach(b=>b.onclick=async()=>{ try{ await savePdfToHub(b.getAttribute('data-gen-save'),id,b.textContent); toast('Saved to Document Hub'); }catch(e){ toast(e.message,'error'); } });
+  $$('[data-gen-share]',body).forEach(b=>{ b.onclick=async()=>{ try{ const url=await createShareLink('pss_booking',id,''); showModal('Share document', `<div class="panel"><div class="panel-body">${shareButtons(url, `Fayaka ${b.textContent} ${pnr||id}`,'')}</div></div>`); }catch(e){ toast(e.message,'error'); } }; });
+  $$('[data-doc-view]',body).forEach(b=>b.onclick=()=>openPdfViewer(`/api/pss/travel-documents/${b.getAttribute('data-doc-view')}/download`,'Travel document'));
+  $$('[data-doc-dl]',body).forEach(b=>b.onclick=()=>{ const a=document.createElement('a'); a.href=`/api/pss/travel-documents/${b.getAttribute('data-doc-dl')}/download?download=1`; a.download=''; document.body.appendChild(a); a.click(); a.remove(); });
+  $$('[data-doc-del]',body).forEach(b=>b.onclick=async()=>{ if(!confirm('Delete this travel document?')) return; try{ await api(`/api/pss/travel-documents/${b.getAttribute('data-doc-del')}`,{method:'DELETE'}); toast('Deleted'); refresh(); }catch(e){ toast(e.message,'error'); } });
+  $$('[data-doc-exp]',body).forEach(b=>b.onclick=()=>{
+    const d=docs.find(x=>String(x.id)===b.getAttribute('data-doc-exp'))||{};
+    showModal('Edit document expiry', `<form id="f-doc-exp" class="form-grid"><div class="form-cols"><div><label>Document</label><input value="${esc(d.title||d.doc_type||'')}" disabled></div><div><label>Expiry date</label><input name="expiry_date" type="date" value="${esc(d.expiry_date||'')}"></div></div><div><label>Notes</label><textarea name="notes" rows="2">${esc(d.notes||'')}</textarea></div><div class="form-actions"><button type="submit" class="primary">Save</button>${btn('Cancel','ghost','','data-action="modal-close"')}</div><div id="f-doc-exp-msg" class="small"></div></form>`);
+    const f=document.getElementById('f-doc-exp');
+    if(f) f.onsubmit=async ev=>{ ev.preventDefault(); try{ await apiPut('/api/pss/travel-documents',d.id,readFormData(f)); hideModal(); toast('Expiry saved'); refresh(); }catch(e){ const m=document.getElementById('f-doc-exp-msg'); if(m){m.textContent=e.message;m.className='small error';} } };
+  });
+  $('#td-upload',body).onclick=()=>{
+    showModal('Add travel document', `<form id="f-doc-add" class="form-grid">
+      <div class="form-cols"><div><label>Document type</label><select name="doc_type">${['passport','visa','id','insurance','other'].map(t=>`<option value="${t}">${t}</option>`).join('')}</select></div><div><label>Document no</label><input name="doc_no"></div></div>
+      <div class="form-cols"><div><label>Title</label><input name="title" placeholder="e.g. Passport"></div><div><label>Expiry date</label><input name="expiry_date" type="date"></div></div>
+      <div><label>File (optional)</label><input name="file" type="file" accept="application/pdf,image/*"></div>
+      <div><label>Notes</label><textarea name="notes" rows="2"></textarea></div>
+      <div class="form-actions"><button type="submit" class="primary">Add document</button>${btn('Cancel','ghost','','data-action="modal-close"')}</div><div id="f-doc-add-msg" class="small"></div></form>`);
+    const f=document.getElementById('f-doc-add');
+    if(f) f.onsubmit=async ev=>{ ev.preventDefault(); const msg=document.getElementById('f-doc-add-msg'); try{ const data=readFormData(f); delete data.file; Object.assign(data,payload); const file=f.elements.file.files[0]; if(file){ data.file_name=file.name; data.mime_type=file.type||'application/pdf'; data.file_base64=await fileToBase64(file); } await api('/api/pss/travel-documents',{method:'POST',body:JSON.stringify(data)}); hideModal(); toast('Travel document added'); refresh(); }catch(e){ if(msg){msg.textContent=e.message;msg.className='small error';} } };
+  };
+  $('#td-remind',body).onclick=async()=>{ try{ const r=await api('/api/pss/travel-documents/reminders',{method:'POST',body:JSON.stringify({days:30})}); toast(r.created?`${r.created} expiry reminder(s) sent`:'No documents nearing expiry'); }catch(e){ toast(e.message,'error'); } };
 }
 async function shareFromAction(view, row, shareBase){
   const ref = row.pnr||row.booking_ref||row.sale_no||row.ref||row.id||'';

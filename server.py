@@ -1065,6 +1065,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self.api_pss_trace_detail(tenant_id, path.rsplit('/', 1)[-1])
             if path == '/api/pss/travel-documents' and method == 'GET':
                 return self.api_pss_travel_documents(tenant_id, qs)
+            if path == '/api/pss/travel-documents' and method == 'POST':
+                return self.api_pss_travel_document_create(tenant_id, user_id)
+            if path.startswith('/api/pss/travel-documents/') and path.endswith('/download') and method == 'GET':
+                return self.api_pss_travel_document_download(tenant_id, path.strip('/').split('/')[3], qs)
+            if path.startswith('/api/pss/travel-documents/') and method in ('PUT', 'DELETE'):
+                return self.api_pss_travel_document_mutate(tenant_id, user_id, path.rsplit('/', 1)[-1], method)
+            if path == '/api/pss/travel-documents/reminders' and method == 'POST':
+                return self.api_pss_travel_expiry_reminders(tenant_id, user_id)
             if path == '/api/pss/partner-clients' and method == 'GET':
                 return self.api_pss_partner_clients(tenant_id, sess)
             if path.startswith('/api/pss/partner-bookings/') and method == 'PUT':
@@ -7703,14 +7711,123 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_pss_travel_documents(self, tenant_id, qs):
         pnr = (qs.get('pnr') or [''])[0]
+        booking_id = (qs.get('booking_id') or [''])[0]
+        customer_id = (qs.get('customer_id') or [''])[0]
         with db() as conn:
-            sql = "SELECT id,booking_id,pnr,doc_type,doc_no,title,file_name,created_at FROM pss_travel_documents WHERE tenant_id=?"
+            sql = """SELECT d.id,d.booking_id,d.pnr,d.doc_type,d.doc_no,d.title,d.file_name,d.mime_type,
+                            d.expiry_date,d.reminder_sent_at,d.notes,d.created_at,
+                            (CASE WHEN d.file_data IS NOT NULL THEN 1 ELSE 0 END) AS has_file
+                     FROM pss_travel_documents d WHERE d.tenant_id=?"""
             args = [tenant_id]
             if pnr:
-                sql += " AND pnr=?"; args.append(pnr)
-            sql += " ORDER BY id DESC LIMIT 200"
+                sql += " AND d.pnr=?"; args.append(pnr)
+            if booking_id:
+                sql += " AND d.booking_id=?"; args.append(self._oid(booking_id))
+            if customer_id:
+                sql += " AND d.booking_id IN (SELECT id FROM pss_bookings WHERE tenant_id=? AND customer_id=?)"
+                args.extend([tenant_id, self._oid(customer_id)])
+            sql += " ORDER BY d.id DESC LIMIT 200"
             rows = q(conn, sql, args)
         return self._json({'documents': rows})
+
+    def api_pss_travel_document_create(self, tenant_id, user_id):
+        data = read_json(self)
+        booking_id = self._oid(data.get('booking_id'))
+        pnr = (data.get('pnr') or '').strip().upper()
+        if not booking_id and not pnr:
+            return self._json({'error': 'booking_id or pnr required'}, 400)
+        file_data = None
+        if data.get('file_base64'):
+            raw = data['file_base64']
+            if isinstance(raw, str) and raw.startswith('data:'):
+                raw = raw.split(',', 1)[-1]
+            try:
+                file_data = base64.b64decode(raw)
+            except Exception:
+                file_data = None
+        ts = now_iso()
+        with db() as conn:
+            if booking_id and not pnr:
+                b = q(conn, "SELECT pnr FROM pss_bookings WHERE id=? AND tenant_id=?", (booking_id, tenant_id), one=True)
+                if b:
+                    pnr = b.get('pnr') or ''
+            cur = conn.execute("""INSERT INTO pss_travel_documents(tenant_id,booking_id,pnr,doc_type,doc_no,title,file_name,mime_type,file_data,notes,expiry_date,uploaded_by,created_at,updated_at)
+                                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                               (tenant_id, booking_id or None, pnr or None, data.get('doc_type') or 'passport',
+                                data.get('doc_no'), data.get('title') or data.get('doc_type') or 'Travel document',
+                                data.get('file_name'), data.get('mime_type'), file_data, data.get('notes'),
+                                data.get('expiry_date') or None, user_id, ts, ts))
+            did = cur.lastrowid
+            self._activity(conn, tenant_id, 'pss_booking', booking_id or did, 'travel_document_added',
+                           f"{data.get('doc_type') or 'document'} {data.get('doc_no') or ''}", user_id)
+        return self._json({'ok': True, 'document_id': did})
+
+    def api_pss_travel_document_download(self, tenant_id, did, qs=None):
+        did = self._oid(did)
+        with db() as conn:
+            row = q(conn, "SELECT * FROM pss_travel_documents WHERE id=? AND tenant_id=?", (did, tenant_id), one=True)
+        if not row:
+            return self._json({'error': 'Travel document not found'}, 404)
+        payload = row.get('file_data')
+        if not payload:
+            return self._json({'error': 'No file attached'}, 404)
+        fname = (row.get('file_name') or row.get('title') or 'document').replace('"', '')
+        force = str(((qs or {}).get('download') or [''])[0]).lower() in ('1', 'true', 'yes')
+        return self._send(payload, 200, row.get('mime_type') or 'application/octet-stream',
+                          {'Content-Disposition': f"{'attachment' if force else 'inline'}; filename=\"{fname}\""})
+
+    def api_pss_travel_document_mutate(self, tenant_id, user_id, did, method):
+        did = self._oid(did)
+        with db() as conn:
+            row = q(conn, "SELECT * FROM pss_travel_documents WHERE id=? AND tenant_id=?", (did, tenant_id), one=True)
+            if not row:
+                return self._json({'error': 'Travel document not found'}, 404)
+            if method == 'DELETE':
+                conn.execute("DELETE FROM pss_travel_documents WHERE id=? AND tenant_id=?", (did, tenant_id))
+                return self._json({'ok': True})
+            data = read_json(self)
+            fields = {}
+            for key in ('doc_type', 'doc_no', 'title', 'notes', 'expiry_date'):
+                if key in data:
+                    fields[key] = data[key] or None
+            if fields:
+                sets = ','.join(f'{k}=?' for k in fields)
+                conn.execute(f"UPDATE pss_travel_documents SET {sets},updated_at=? WHERE id=? AND tenant_id=?",
+                             (*fields.values(), now_iso(), did, tenant_id))
+        return self._json({'ok': True})
+
+    def api_pss_travel_expiry_reminders(self, tenant_id, user_id):
+        days = 30
+        data = read_json(self) if (self.headers.get('Content-Length') or '0') not in ('', '0', None) else {}
+        try:
+            days = max(1, min(365, int(data.get('days') or 30)))
+        except Exception:
+            days = 30
+        created = 0
+        with db() as conn:
+            rows = q(conn, """SELECT d.id,d.title,d.doc_no,d.expiry_date,d.booking_id,b.passenger_name,b.pnr,b.contact_email,b.contact_phone
+                              FROM pss_travel_documents d LEFT JOIN pss_bookings b ON b.id=d.booking_id
+                              WHERE d.tenant_id=? AND d.expiry_date IS NOT NULL AND d.expiry_date<>''
+                                AND d.reminder_sent_at IS NULL""", (tenant_id,))
+            today = date.today()
+            for row in rows:
+                try:
+                    exp = datetime.strptime(str(row['expiry_date'])[:10], '%Y-%m-%d').date()
+                except Exception:
+                    continue
+                diff = (exp - today).days
+                if diff > days:
+                    continue
+                status = 'expired' if diff < 0 else ('expires today' if diff == 0 else f'expires in {diff} day(s)')
+                who = row.get('passenger_name') or row.get('pnr') or 'Passenger'
+                title = f"Travel document expiry: {row.get('title') or row.get('doc_type') or 'Document'}"
+                msg = f"{who}'s {row.get('title') or 'travel document'} {status} on {row['expiry_date']}. Doc no: {row.get('doc_no') or '-'}. Contact: {row.get('contact_email') or row.get('contact_phone') or 'on file'}."
+                conn.execute("""INSERT INTO notifications(tenant_id,user_id,notification_type,title,message,entity_type,entity_id,is_read,created_at)
+                                VALUES (?,?,?,?,?,?,?,?,?)""",
+                             (tenant_id, user_id, 'warning', title, msg, 'pss_booking', row.get('booking_id') or row['id'], 0, now_iso()))
+                conn.execute("UPDATE pss_travel_documents SET reminder_sent_at=? WHERE id=? AND tenant_id=?", (now_iso(), row['id'], tenant_id))
+                created += 1
+        return self._json({'ok': True, 'created': created})
 
     def api_pss_partner_clients(self, tenant_id, sess):
         agency_id = (sess or {}).get('agency_id')

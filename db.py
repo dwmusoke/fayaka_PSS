@@ -1991,6 +1991,8 @@ CREATE TABLE IF NOT EXISTS pss_travel_documents (
   mime_type TEXT,
   file_data BLOB,
   notes TEXT,
+  expiry_date TEXT,
+  reminder_sent_at TEXT,
   uploaded_by TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -2108,7 +2110,10 @@ def init_db():
 
 def _add_columns(conn, table, cols):
     try:
-        existing = {r['name'] for r in q(conn, f"PRAGMA table_info({table})")}
+        if USING_POSTGRES:
+            existing = {r['column_name'] for r in q(conn, "SELECT column_name FROM information_schema.columns WHERE table_name=%s AND table_schema='public'", (table,))}
+        else:
+            existing = {r['name'] for r in q(conn, f"PRAGMA table_info({table})")}
     except Exception:
         return
     for col, ddl in cols:
@@ -2170,6 +2175,10 @@ def ensure_erp_pss_link(conn):
         ('erp_payment_id', 'INTEGER'),
         ('invoice_id', 'INTEGER'),
         ('raw_json', 'TEXT'),
+    ])
+    _add_columns(conn, 'pss_travel_documents', [
+        ('expiry_date', 'TEXT'),
+        ('reminder_sent_at', 'TEXT'),
     ])
     try:
         conn.executescript("""
