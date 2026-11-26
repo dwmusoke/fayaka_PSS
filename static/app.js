@@ -3092,7 +3092,12 @@ function showLogin(){
   if(form){
     let code='';
     try{ code=sessionStorage.getItem('switchTenant')||''; sessionStorage.removeItem('switchTenant'); }catch(e){}
-    if(code && form.elements.tenant) form.elements.tenant.value=code;
+    if(code){
+      if(form.elements.tenant) form.elements.tenant.value=code;
+      if(form.elements.username) form.elements.username.value='';
+      if(form.elements.password) form.elements.password.value='';
+      const err=$('#login-error'); if(err) err.textContent='';
+    }
     setTimeout(()=>form.elements.username?.focus(),50);
   }
 }
