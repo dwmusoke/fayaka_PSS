@@ -870,6 +870,16 @@ async function renderList(name, el, pageArg){
       toast(`${itemAction} not implemented for this view`, 'error');
     };
   });
+  ['pdf','receipt','statement','boardingpass','itinerary','voucher','booking-confirmation','credit-note','quotation','journeypass'].forEach(a=>{
+    el.querySelectorAll(`[data-action="${a}"]`).forEach(btn=>{
+      btn.onclick = ()=>{
+        const id = btn.getAttribute('data-id');
+        const pdf = btn.getAttribute('data-pdf')||a;
+        const row = rows.find(x=>String(x[idKey])===String(id)) || {};
+        openPdfViewer(`/api/documents/pdf/${pdf}/${encodeURIComponent(id)}`, row.ref||row.title||pdf.replace(/-/g,' ').replace(/\b\w/g,c=>c.toUpperCase()));
+      };
+    });
+  });
   el.querySelectorAll('[data-action="new-record"]').forEach(btn=>{
     btn.onclick = ()=>{
       const flds = fieldsFor(name);
