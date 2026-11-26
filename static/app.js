@@ -664,6 +664,7 @@ function wireCellEditors(root){
   const table = root.querySelector('.excel-table');
   if(!table) return;
   table.querySelectorAll('td[data-field]:not(.actions-cell)').forEach(td=>{
+    if(td.querySelector('.id-link')) return; // keep primary-key links clickable
     td.addEventListener('click', async ()=>{
       if(td.classList.contains('editing')) return;
       const row = td.closest('tr');
