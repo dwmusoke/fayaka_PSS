@@ -1426,8 +1426,8 @@ const ROLE_VIEWS = {
   airline_accountant: ['dashboard','finance','invoicing','credit-notes','payments','revenue','refunds','coupons','vouchers','bank-accounts','bank-transactions','reconciliations','bills','expenses','journals','unused-tickets','fare-optimization','analytics','documents','shares','loyalty','tasks','notifications'],
   airline_reservations: ['dashboard','pss-overview','pss-flights','flight-inventory','pss-bookings','pss-checkins','pss-stock','agency-wallet','pss-eticket-tracker','pss-ticket-status','pss-agencies','pss-direct','pss-charters','pss-charter-flights','unused-tickets','fare-optimization','dispatch','crm','travelers','documents','shares','tasks','notifications','analytics','revenue'],
   airline_operations: ['dashboard','pss-overview','pss-flights','flight-inventory','pss-bookings','seat-hold','pss-checkins','pss-weather','pss-airport-docs','disruptions','dispatch','pss-ticket-status','pss-trace','documents','shares','tasks','notifications','intelligence','analytics','revenue'],
-  agency_admin: ['pss-workspace','pss-bookings','crm','finance','invoicing','credit-notes','payments','estimates','documents','shares','tasks','notifications'],
-  agency_agent: ['pss-workspace','pss-bookings','crm','finance','invoicing','credit-notes','payments','estimates','documents','shares','tasks','notifications'],
+  agency_admin: ['pss-workspace','pss-bookings','agency-wallet','crm','finance','invoicing','credit-notes','payments','estimates','documents','shares','tasks','notifications'],
+  agency_agent: ['pss-workspace','pss-bookings','agency-wallet','crm','finance','invoicing','credit-notes','payments','estimates','documents','shares','tasks','notifications'],
   viewer: ['dashboard','analytics']
 };
 const ROLE_HOME = {
@@ -2133,7 +2133,7 @@ async function render_pss_workspace(el){
   el.querySelectorAll('[data-goto]').forEach(btn=>{ btn.onclick = ()=> setView(btn.getAttribute('data-goto')); });
   el.querySelectorAll('[data-issue-booking]').forEach(btn=>{ btn.onclick = async ()=>{
     const id = btn.getAttribute('data-issue-booking'); btn.disabled = true;
-    try{ const r = await api(`/api/pss/bookings/${id}/issue-ticket`, {method:'POST'}); toast(`Ticket issued: ${r.ticket_number||'ok'}`); render_pss_workspace(el); }
+    try{ const r = await api(`/api/pss/bookings/${id}/ticket`, {method:'POST'}); toast(`Ticket issued: ${r.ticket_number||'ok'}`); render_pss_workspace(el); }
     catch(err){ toast(err.message||'Issue failed','error'); btn.disabled = false; }
   }; });
 }
@@ -2150,6 +2150,8 @@ async function render_agency_wallet(el){
   const allocs = Array.isArray(d.allocations) ? d.allocations : [];
   const txs = Array.isArray(d.wallet_transactions) ? d.wallet_transactions : [];
   const agencies = Array.isArray(ag.agencies) ? ag.agencies : [];
+  const isAgency = ['agency_admin','agency_agent','agency'].includes(state.session?.role);
+  const myAgencyId = state.session?.agency_id;
   const totalBalance = wallets.reduce((s,w)=>s+Number(w.balance||0),0);
   const currency = wallets[0]?.currency || d.pools?.[0]?.currency || 'USD';
   const table = (rows, cols, empty) => rows.length
@@ -2158,7 +2160,7 @@ async function render_agency_wallet(el){
   const walletRows = wallets.map(w=>({agency:w.agency_name||w.agency_code||w.agency_id, balance:money(w.balance||0,w.currency||currency), allocations:w.allocations||0, allocated_amount:money(w.allocated_amount||0,w.currency||currency), status:w.status||'active'}));
   const allocView = allocs.map(a=>({allocation_no:a.allocation_no, agency:a.agency_name||a.allocated_to||'-', range:`${a.start_serial} ? ${a.end_serial}`, amount:money(a.total_amount||0,a.currency||currency), remaining:Math.max(0,Number(a.end_serial||0)-Number(a.next_serial||a.start_serial||0)+1), status:a.status||'active'}));
   const txView = txs.map(t=>({tx_no:t.tx_no, agency:t.agency_name||t.agency_id, type:t.tx_type, amount:money(t.direction==='debit'?-Math.abs(t.amount||0):t.amount||0,t.currency||currency), status:t.status, reference:t.reference||t.gateway_ref||'-', created_at:t.created_at}));
-  el.innerHTML = `${pageHead(esc(meta[0]), esc(meta[1]||''), `<button class="mini-btn secondary" data-action="topup-wallet">Top up wallet</button> <button class="mini-btn primary" data-goto="pss-stock">Allocate stock</button>`)}
+  el.innerHTML = `${pageHead(esc(meta[0]), esc(meta[1]||''), `<button class="mini-btn secondary" data-action="topup-wallet">Top up wallet</button>${isAgency?'':' <button class="mini-btn primary" data-goto="pss-stock">Allocate stock</button>'}`)}
     <div class="grid kpi-row" style="margin-bottom:16px">${kpi('Agencies',wallets.length,'users')}${kpi('Wallet balance',money(totalBalance,currency),'finance')}${kpi('Allocations',allocs.length,'file')}${kpi('Top-ups/Txns',txs.length,'chart')}</div>
     ${panel('Agency wallets', table(walletRows,['agency','balance','allocations','allocated_amount','status'],'No agency wallets yet.'), '', 'Wallet credit is debited when stock is allocated at a unit price.')}
     ${panel('Wallet transactions', table(txView,['tx_no','agency','type','amount','status','reference','created_at'],'No wallet transactions yet.'), '', 'Flutterwave top-ups and allocation debits.')}
@@ -2171,8 +2173,12 @@ async function render_agency_wallet(el){
   }
   el.querySelector('[data-action="topup-wallet"]')?.addEventListener('click', ()=>{
     const agencyOpts = agencies.map(a=>`<option value="${esc(a.id)}">${esc(a.name||a.code||('Agency '+a.id))}</option>`).join('') || '<option value="">No agencies found</option>';
+    const agencyField = (isAgency && myAgencyId)
+      ? `<input type="hidden" name="agency_id" value="${esc(myAgencyId)}">`
+      : `<div><label>Agency *</label><select name="agency_id" required>${agencyOpts}</select></div>`;
     showModal('Top up agency wallet', `<form id="f-wallet-topup" class="form-grid">
-      <div class="form-cols"><div><label>Agency *</label><select name="agency_id" required>${agencyOpts}</select></div><div><label>Amount *</label><input name="amount" type="number" min="1" step="0.01" required></div></div>
+      <div class="form-cols">${(isAgency && myAgencyId) ? '' : agencyField}<div><label>Amount *</label><input name="amount" type="number" min="1" step="0.01" required></div></div>
+      ${(isAgency && myAgencyId) ? agencyField : ''}
       <div class="form-cols"><div><label>Currency</label><input name="currency" value="${esc(currency)}"></div><div><label>Phone (optional)</label><input name="phone" placeholder="Mobile Money number"></div></div>
       <div><label>Email (optional)</label><input name="email" type="email" placeholder="agency@example.com"></div>
       <div class="muted tiny">Uses configured Flutterwave gateway. In demo mode (no secret key), verification is immediate.</div>
