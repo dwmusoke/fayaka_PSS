@@ -599,3 +599,5 @@ html[data-theme="dark"] .profile-avatar { color: #08111f; }
 .pdf-viewer-modal .modal-card { border-radius: 12px; overflow: hidden; }
 .pdf-viewer-modal .pdf-frame { flex: 1 1 auto; width: 100%; min-height: 0; border: 0; background: #fff; display: block; }
 .pdf-viewer-actions { display: flex; gap: 8px; padding: 10px 16px; border-top: 1px solid #e2e8f0; background: #f8fafc; justify-content: flex-end; }
+.protected-input { background: #f1f5f9 !important; color: #64748b !important; cursor: not-allowed; border-style: dashed !important; }
+.json-input { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; line-height: 1.45; white-space: pre; overflow: auto; }

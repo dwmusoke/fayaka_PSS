@@ -1404,8 +1404,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.api_shares_list(tenant_id)
             if path == '/api/shares' and method == 'POST':
                 return self.api_share_create(tenant_id, user_id)
-            if path.startswith('/api/shares/') and method == 'DELETE':
-                return self.api_share_delete(tenant_id, path.rsplit('/', 1)[-1])
+            if path.startswith('/api/shares/') and method in ('PUT', 'PATCH', 'DELETE'):
+                return self.api_share_mutate(tenant_id, path.rsplit('/', 1)[-1], user_id, method)
             if path == '/api/branding' and method == 'GET':
                 return self.api_branding_get(tenant_id)
             if path == '/api/branding' and method == 'POST':
@@ -4202,6 +4202,33 @@ class Handler(BaseHTTPRequestHandler):
         sid = self._oid(sid)
         with db() as conn:
             conn.execute("DELETE FROM document_shares WHERE id=? AND tenant_id=?", (sid, tenant_id))
+            return self._json({'ok': True})
+
+    def api_share_mutate(self, tenant_id, sid, user_id, method):
+        sid = self._oid(sid)
+        with db() as conn:
+            row = q(conn, "SELECT * FROM document_shares WHERE id=? AND tenant_id=?", (sid, tenant_id), one=True)
+            if not row:
+                return self._json({'error': 'Share link not found'}, 404)
+            if method == 'DELETE':
+                conn.execute("DELETE FROM document_shares WHERE id=? AND tenant_id=?", (sid, tenant_id))
+                log_audit(conn, tenant_id, user_id, 'share_delete', row['entity_type'], row['entity_id'], {'share_id': sid})
+                return self._json({'ok': True})
+            data = read_json(self)
+            fields = {}
+            for key in ('recipient', 'permission', 'status', 'expires_at'):
+                if key in data:
+                    fields[key] = data[key]
+            if 'permission' in fields and fields['permission'] not in ('view', 'download'):
+                return self._json({'error': 'Invalid permission'}, 400)
+            if 'status' in fields and fields['status'] not in ('active', 'revoked'):
+                return self._json({'error': 'Invalid status'}, 400)
+            if fields:
+                sets = ','.join(f'{k}=?' for k in fields)
+                conn.execute(f"UPDATE document_shares SET {sets} WHERE id=? AND tenant_id=?", (*fields.values(), sid, tenant_id))
+            self._activity(conn, tenant_id, row['entity_type'], row['entity_id'], 'share_updated',
+                           f"recipient={fields.get('recipient') or row.get('recipient') or 'client'}", user_id)
+            log_audit(conn, tenant_id, user_id, 'share_update', row['entity_type'], row['entity_id'], {'share_id': sid, **fields})
         return self._json({'ok': True})
 
     def api_branding_get(self, tenant_id):

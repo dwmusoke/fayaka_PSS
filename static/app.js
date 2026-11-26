@@ -249,7 +249,7 @@ const VIEW_ACTIONS = {
   'credit-notes':[{label:'View',action:'view'},{label:'PDF',action:'pdf',pdf:'credit_note'},{label:'Edit',action:'edit'},{label:'Share',action:'share'},{label:'Post',action:'post'}],
   estimates:[{label:'View',action:'view'},{label:'Edit',action:'edit'},{label:'Duplicate',action:'duplicate'},{label:'PDF',action:'pdf',pdf:'estimate'},{label:'Send',action:'share'},{label:'Delete',action:'delete',danger:true}],
   documents:[{label:'View',action:'view'},{label:'Save',action:'edit'},{label:'Download',action:'download'},{label:'Share',action:'share'},{label:'Delete',action:'delete',danger:true}],
-  shares:[{label:'Open',action:'open'},{label:'Copy link',action:'copy'},{label:'Revoke',action:'delete',danger:true}],
+  shares:[{label:'Open',action:'open'},{label:'Edit',action:'edit'},{label:'Copy link',action:'copy'},{label:'Revoke',action:'delete',danger:true}],
   refunds:[{label:'Review',action:'view'},{label:'Update',action:'edit'},{label:'Share',action:'share'},{label:'Approve',action:'approve'}],
   coupons:[{label:'View',action:'view'},{label:'Edit',action:'edit'},{label:'Duplicate',action:'duplicate'},{label:'Share',action:'share'},{label:'Deactivate',action:'deactivate',danger:true}],
   vouchers:[{label:'View',action:'view'},{label:'Edit',action:'edit'},{label:'Duplicate',action:'duplicate'},{label:'Share',action:'share'},{label:'Deactivate',action:'deactivate',danger:true}],
@@ -435,8 +435,17 @@ function schemaControl(spec,row={}){
 function schemaFields(schema,row={}){
   return schema.map(s=>s.type==='hidden'?schemaControl(s,row):`<div><label>${fieldLabel(s.name)}${s.required?' *':''}</label>${schemaControl(s,row)}</div>`).join('');
 }
-function schemaPayload(form,schema){
+function readFormData(form){
   const data = Object.fromEntries(new FormData(form).entries());
+  $$('.json-input', form).forEach(el=>{
+    const name = el.getAttribute('name');
+    if(!name) return;
+    try{ data[name] = JSON.parse(el.value); }catch(e){ /* keep raw text */ }
+  });
+  return data;
+}
+function schemaPayload(form,schema){
+  const data = readFormData(form);
   schema.forEach(s=>{
     if(s.type==='checkbox') data[s.name] = form.elements[s.name]?.checked ? 1 : 0;
     if(s.type==='number' && data[s.name]==='') delete data[s.name];
@@ -580,11 +589,16 @@ const CREATE_SCHEMAS = {
     txt('description'),area('notes')
   ]}
 };
+const PROTECTED_FIELDS = new Set(['id','tenant_id','created_at','updated_at','created_by','updated_by','last_viewed_at','views','token']);
+function isJsonValue(v){ return v!==null && v!==undefined && (typeof v==='object') && (Array.isArray(v) || v.constructor===Object); }
+function prettyJson(v){ try{ return JSON.stringify(v, null, 2); }catch(e){ return String(v); } }
 function inputFor(key, val, required){
   const t = FIELD_TYPES[key] || (typeof val==='number'?'number':(typeof val==='boolean'?'checkbox':'text'));
   const v = val===null||val===undefined?'':esc(val);
   const req = required?' required':'';
   const checked = (val===true||val===1||val==='1')?' checked':'';
+  if(PROTECTED_FIELDS.has(key) && t!=='hidden') return `<input type="text" class="protected-input" value="${esc(isJsonValue(val)?prettyJson(val):(val??'—'))}" readonly title="System-managed field — cannot be edited">`;
+  if(isJsonValue(val)) return `<textarea name="${esc(key)}" rows="4" class="json-input" placeholder="JSON">${esc(prettyJson(val))}</textarea>`;
   if(t==='hidden') return `<input type="hidden" name="${esc(key)}" value="${v}">`;
   if(t==='checkbox') return `<label class="checkbox-row"><input type="checkbox" name="${esc(key)}"${checked}> ${esc(key.replace(/[_]/g,' '))}</label>`;
   if(t==='select'){
@@ -772,7 +786,7 @@ async function renderList(name, el, pageArg){
       const editTitle = `Edit ${meta[0]}`;
       showModal(editTitle, `<form id="f-edit-${name}" class="form-grid">${ucols.map(c=>`<div><label>${fieldLabel(c)}</label>${inputFor(c, row[c], row[c]||'')}</div>`).join('')}${passwordField}<div class="form-actions"><button type="submit" class="primary">Save</button>${btn('Cancel','ghost','','data-action="modal-close"')}</div></form>`);
       const form = document.querySelector(`#f-edit-${name}`);
-      if(form) form.onsubmit = async (ev)=>{ ev.preventDefault(); const udata=Object.fromEntries(new FormData(form).entries()); try{ await apiPut(path,id,udata); hideModal(); toast('Saved'); renderList(name, el); }catch(err){ toast(err.message,'error'); } };
+      if(form) form.onsubmit = async (ev)=>{ ev.preventDefault(); const udata=readFormData(form); try{ await apiPut(path,id,udata); hideModal(); toast('Saved'); renderList(name, el); }catch(err){ toast(err.message,'error'); } };
     }catch(err){ toast(err.message,'error'); }
   };
   const openRefund = async (id)=>{
@@ -800,7 +814,27 @@ async function renderList(name, el, pageArg){
       }catch(err){ if(msg){ msg.textContent=err.message; msg.className='small error'; } else toast(err.message,'error'); }
     };
   };
-  el.querySelectorAll('[data-action="edit"]').forEach(b=>{ b.onclick = ()=> openEdit(b.getAttribute('data-id')); });
+  const openShareEdit = (id)=>{
+    const row = rows.find(x=>String(x[idKey])===String(id)) || {};
+    const exp = row.expires_at ? String(row.expires_at).slice(0,16) : '';
+    showModal('Edit share link', `<form id="f-share-edit" class="form-grid">
+      <div class="form-cols"><div><label>Recipient</label><input name="recipient" type="email" value="${esc(row.recipient||'')}" placeholder="client@example.com"></div><div><label>Permission</label><select name="permission"><option value="view"${row.permission==='view'?' selected':''}>view</option><option value="download"${row.permission==='download'?' selected':''}>download</option></select></div></div>
+      <div class="form-cols"><div><label>Status</label><select name="status"><option value="active"${row.status!=='revoked'?' selected':''}>active</option><option value="revoked"${row.status==='revoked'?' selected':''}>revoked</option></select></div><div><label>Expires at</label><input name="expires_at" type="datetime-local" value="${esc(exp)}"></div></div>
+      <div><label>Share link</label><input value="${esc(row.url||('/share/'+row.token))}" readonly class="protected-input" title="Link is derived from token and cannot be edited"></div>
+      <div><label>Entity</label><input value="${esc(row.entity_type||'')} #${esc(row.entity_id||'')}" readonly class="protected-input" title="Linked record cannot be changed"></div>
+      <div class="form-actions"><button type="submit" class="primary">Save share link</button>${btn('Cancel','ghost','','data-action="modal-close"')}</div>
+      <div id="f-share-edit-msg" class="small"></div>
+    </form>`);
+    const form = document.getElementById('f-share-edit');
+    if(!form) return;
+    form.onsubmit = async (ev)=>{
+      ev.preventDefault();
+      const msg = document.getElementById('f-share-edit-msg');
+      try{ await apiPut('/api/shares', id, readFormData(form)); hideModal(); toast('Share link updated'); renderList(name, el); }
+      catch(err){ if(msg){ msg.textContent=err.message; msg.className='small error'; } else toast(err.message,'error'); }
+    };
+  };
+  el.querySelectorAll('[data-action="edit"]').forEach(b=>{ b.onclick = ()=> (name==='shares' ? openShareEdit(b.getAttribute('data-id')) : openEdit(b.getAttribute('data-id'))); });
   el.querySelectorAll('[data-action="refund"]').forEach(b=>{ b.onclick = ()=> openRefund(b.getAttribute('data-id')); });
   el.querySelectorAll('[data-action="delete"]').forEach(btn=>{
     btn.onclick = async ()=>{
@@ -839,7 +873,20 @@ async function renderList(name, el, pageArg){
     };
   });
   el.querySelectorAll('[data-action="open"]').forEach(btn=>{
-    btn.onclick = ()=>{ const row = rows.find(x=>String(x[idKey])===String(btn.getAttribute('data-id'))); if(row){ const ref=row.pnr||row.booking_ref||row.sale_no||row.id; showModal('Details', `<pre style="white-space:pre-wrap">${esc(JSON.stringify(row,null,2))}</pre>`); } };
+    btn.onclick = ()=>{
+      const row = rows.find(x=>String(x[idKey])===String(btn.getAttribute('data-id')));
+      if(!row) return;
+      if(name==='shares'){ window.open(row.url||('/share/'+row.token),'_blank'); return; }
+      showModal(meta[0]+' detail', `<div class="detail-grid">${Object.entries(row).map(([k,v])=>`<div class="detail-row"><div class="detail-k">${fieldLabel(k)}</div><div class="detail-v">${cellFor(k, isJsonValue(v)?prettyJson(v):v)}</div></div>`).join('')}</div>`);
+    };
+  });
+  el.querySelectorAll('[data-action="copy"]').forEach(btn=>{
+    btn.onclick = async ()=>{
+      const row = rows.find(x=>String(x[idKey])===String(btn.getAttribute('data-id')));
+      if(!row) return;
+      const url = location.origin + (row.url||('/share/'+row.token));
+      try{ await navigator.clipboard.writeText(url); toast('Share link copied'); }catch(e){ window.prompt('Copy share link', url); }
+    };
   });
   el.querySelectorAll('[data-action="view"]').forEach(btn=>{
     btn.onclick = async ()=>{
@@ -883,9 +930,11 @@ async function renderList(name, el, pageArg){
         try{ const detail = await fetchRowDetail(path, id, row, idKey, d); showModal(meta[0]+' detail', `<div class="detail-grid">${Object.entries(detail).map(([k,v])=>`<div class="detail-row"><div class="detail-k">${fieldLabel(k)}</div><div class="detail-v">${cellFor(k,v)}</div></div>`).join('')}</div>`); }catch(err){ toast(err.message,'error'); }
         return;
       }
-      if(itemAction==='edit'){ openEdit(id); return; }
+      if(itemAction==='edit'){ (name==='shares' ? openShareEdit(id) : openEdit(id)); return; }
       if(itemAction==='delete'){ el.querySelector(`[data-action="delete"][data-id="${CSS.escape(id)}"]`)?.click(); return; }
       if(itemAction==='share'){ shareFromAction(name, row, d.share_base||''); return; }
+      if(itemAction==='copy'){ const url=location.origin+(row.url||('/share/'+row.token)); try{ await navigator.clipboard.writeText(url); toast('Share link copied'); }catch(e){ window.prompt('Copy share link', url); } return; }
+      if(itemAction==='open'){ if(name==='shares'){ window.open(row.url||('/share/'+row.token),'_blank'); } else showModal(meta[0]+' detail', `<div class="detail-grid">${Object.entries(row).map(([k,v])=>`<div class="detail-row"><div class="detail-k">${fieldLabel(k)}</div><div class="detail-v">${cellFor(k, isJsonValue(v)?prettyJson(v):v)}</div></div>`).join('')}</div>`); return; }
       if(itemAction==='duplicate'){ el.querySelector(`[data-action="duplicate"][data-id="${CSS.escape(id)}"]`)?.click(); return; }
       if(itemAction==='ticket'){ el.querySelector(`[data-action="ticket"][data-id="${CSS.escape(id)}"]`)?.click(); return; }
       if(['pdf','receipt','statement','boardingpass','itinerary','voucher','booking-confirmation','credit-note','quotation','journeypass'].includes(itemAction) || btn.getAttribute('data-pdf')){ const pdf = btn.getAttribute('data-pdf')||itemAction; openPdfViewer(`/api/documents/pdf/${pdf}/${encodeURIComponent(id)}`, row.ref||row.title||pdf.replace(/-/g,' ').replace(/\b\w/g,c=>c.toUpperCase())); return; }
@@ -909,7 +958,7 @@ async function renderList(name, el, pageArg){
       const flds = fieldsFor(name);
       showModal(`New ${meta[0]}`, `<form id="f-create-${name}" class="form-grid">${flds.map(c=>`<div><label>${fieldLabel(c)}</label>${inputFor(c,'','')}</div>`).join('')}<div class="form-actions"><button type="submit" class="primary">Create</button>${btn('Cancel','ghost','','data-action="modal-close"')}</div></form>`);
       const form = document.querySelector(`#f-create-${name}`);
-      if(form) form.onsubmit = async (ev)=>{ ev.preventDefault(); try{ await api(createPath,{method:'POST',body:JSON.stringify(Object.fromEntries(new FormData(form).entries()))}); hideModal(); toast('Created'); renderList(name,el); }catch(err){ toast(err.message,'error'); } };
+      if(form) form.onsubmit = async (ev)=>{ ev.preventDefault(); try{ await api(createPath,{method:'POST',body:JSON.stringify(readFormData(form))}); hideModal(); toast('Created'); renderList(name,el); }catch(err){ toast(err.message,'error'); } };
     };
   });
   el.querySelectorAll('[data-action="refresh-view"]').forEach(btn=>{ btn.onclick = ()=> renderList(name,el); });
