@@ -1195,6 +1195,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.api_pss_payments(tenant_id, sess=sess)
             if path == '/api/pss/payments' and method == 'POST':
                 return self.api_pss_payment_create(tenant_id, user_id, sess=sess)
+            if path.startswith('/api/pss/payments/') and path.endswith('/refund') and method == 'POST':
+                return self.api_payment_refund(tenant_id, user_id, path.strip('/').split('/')[3], 'pss')
             if path.startswith('/api/pss/payments/') and method in ('GET', 'PUT'):
                 return self.api_pss_payment_mutate(tenant_id, path.rsplit('/', 1)[-1], method)
             if path == '/api/pss/stock' and method == 'GET':
@@ -1256,6 +1258,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.api_payments(tenant_id, sess=sess)
             if path == '/api/payments' and method == 'POST':
                 return self.api_payment_create(tenant_id, user_id, sess=sess)
+            if path.startswith('/api/payments/') and path.endswith('/refund') and method == 'POST':
+                return self.api_payment_refund(tenant_id, user_id, path.strip('/').split('/')[3], 'erp')
             if path.startswith('/api/payments/') and method in ('GET', 'PUT', 'DELETE'):
                 return self.api_payment_mutate(tenant_id, user_id, path.rsplit('/', 1)[-1], method, sess=sess)
             if path.startswith('/api/credit-notes/') and method == 'GET':
@@ -5668,6 +5672,68 @@ class Handler(BaseHTTPRequestHandler):
             conn.execute(f"UPDATE pss_payments SET {','.join(sets)}, updated_at=? WHERE id=? AND tenant_id=?", args)
             updated = q(conn, "SELECT * FROM pss_payments WHERE id=? AND tenant_id=?", (pid, tenant_id), one=True)
         return self._json({'ok': True, 'payment': updated})
+
+    def api_payment_refund(self, tenant_id, user_id, pid, source='pss'):
+        pid = self._oid(pid)
+        data = read_json(self)
+        try:
+            amount = float(data.get('amount') or 0)
+        except Exception:
+            amount = 0
+        reason = str(data.get('reason') or 'client_request').strip()
+        notes = str(data.get('notes') or '').strip()
+        approve = str(data.get('approval') or 'pending').lower() in ('approved', 'approve', '1', 'true', 'yes')
+        table = 'pss_payments' if source == 'pss' else 'payments'
+        with db() as conn:
+            pay = q(conn, f"SELECT * FROM {table} WHERE id=? AND tenant_id=?", (pid, tenant_id), one=True)
+            if not pay:
+                return self._json({'error': 'Payment not found'}, 404)
+            paid_amount = float(pay.get('amount') or 0)
+            if amount <= 0:
+                amount = paid_amount
+            if amount <= 0:
+                return self._json({'error': 'Refund amount must be greater than zero'}, 400)
+            if amount > paid_amount:
+                return self._json({'error': 'Refund amount cannot exceed the payment amount'}, 400)
+            refund_no = 'RF-' + str(pay.get('payment_no') or pid).replace('-', '')[:30]
+            if q(conn, "SELECT 1 FROM refunds WHERE tenant_id=? AND refund_no=?", (tenant_id, refund_no), one=True):
+                return self._json({'error': 'A refund already exists for this payment'}, 409)
+            booking_id = pay.get('booking_id') if source == 'pss' else None
+            booking = None
+            if booking_id:
+                booking = q(conn, "SELECT id,pnr,ticket_number,passenger_name FROM pss_bookings WHERE id=? AND tenant_id=?", (booking_id, tenant_id), one=True)
+            ts = now_iso()
+            status = 'approved' if approve else 'pending'
+            conn.execute("""INSERT INTO refunds(tenant_id,refund_no,order_id,pnr,ticket_no,traveler_name,source,reason,amount,currency,
+                            policy_check,auto_void,status,requested_at,processed_at,notes,created_at,updated_at)
+                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                         (tenant_id, refund_no, pay.get('order_id') if source == 'erp' else None,
+                          booking.get('pnr') if booking else None, booking.get('ticket_number') if booking else None,
+                          booking.get('passenger_name') if booking else None,
+                          'pss_payment' if source == 'pss' else 'payment', reason, amount,
+                          pay.get('currency') or self._tenant_currency(conn, tenant_id) or 'USD',
+                          'passed', 0, status, ts, ts if approve else None,
+                          notes or f'Refund against {pay.get("payment_no") or pid}', ts, ts))
+            pay_status = 'refunded' if approve else 'refund_pending'
+            conn.execute(f"UPDATE {table} SET status=?, updated_at=? WHERE id=? AND tenant_id=?", (pay_status, ts, pid, tenant_id))
+            if source == 'pss' and booking_id:
+                conn.execute("UPDATE pss_bookings SET payment_status=?, updated_at=? WHERE id=? AND tenant_id=?",
+                             (pay_status, ts, booking_id, tenant_id))
+                try:
+                    self._erp_sync_pss_booking(conn, tenant_id, booking_id, actor=user_id or 'refund', source='refund')
+                    self._erp_sync_pss_payment(conn, tenant_id, pay['id'], actor=user_id or 'refund', source='refund')
+                except Exception:
+                    pass
+            if source == 'erp' and pay.get('invoice_id'):
+                try:
+                    from ingest import recompute_invoice
+                    recompute_invoice(conn, pay['invoice_id'])
+                except Exception:
+                    pass
+            self._activity(conn, tenant_id, 'pss_booking' if source == 'pss' else 'payment',
+                           booking_id or pid, 'refund_requested', f"{refund_no} {amount}", user_id)
+            log_audit(conn, tenant_id, user_id, 'refund', 'payment', pid, {'refund_no': refund_no, 'amount': amount, 'status': pay_status})
+        return self._json({'ok': True, 'refund_no': refund_no, 'status': pay_status})
 
     def _tenant_currency(self, conn, tenant_id):
         row = q(conn, "SELECT settings_json FROM tenants WHERE id=?", (tenant_id,), one=True) or {}
