@@ -1265,21 +1265,34 @@ async function openCharterOps(action, row){
     return;
   }
   if(action==='charter-passengers'){
-    let detail={},plist=[];
+    let detail={},plist={};
     try{ [detail,plist] = await Promise.all([api(`/api/pss/charters/${id}`),api(`/api/pss/charters/${id}/passengers`)]); }catch(e){ toast(e.message,'error'); }
     const flights=detail.flights||[];
     const rows=(plist.passengers||[]).map(p=>`<tr><td>${esc(p.name)}</td><td>${esc(p.doc_no||'-')}</td><td>${esc(p.seat_no||'-')}</td><td>${esc(p.ticket_number||'-')}</td><td>${statusBadge(p.checkin_status||'pending')}</td></tr>`).join('')||'<tr><td colspan="5" class="empty">No passengers yet</td></tr>';
+    const listHtml=`<div class="table-wrap"><table><thead><tr><th>Name</th><th>Doc no</th><th>Seat</th><th>Ticket</th><th>Check-in</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    if(!flights.length){
+      const needsQuote=!Number(row.quoted_amount||detail.request?.quoted_amount||0);
+      showModal('Charter passengers', `<div class="panel"><div class="panel-body">${listHtml}
+        <div class="panel" style="margin-top:14px;border:1px solid #fcd34d;background:#fffbeb"><div class="panel-body">
+          <b>Confirm the charter before adding passengers</b>
+          <div class="muted small" style="margin:6px 0 10px">Passengers are attached to a confirmed charter flight. ${needsQuote?'Issue a quote first, then':''} confirm the charter to create its flight and PNR.</div>
+          <div class="cta-row">${needsQuote?`<button class="mini-btn secondary" id="ch-go-quote">Issue quote</button>`:''}<button class="mini-btn primary" id="ch-go-confirm">Confirm charter</button>${btn('Cancel','ghost','','data-action="modal-close"')}</div>
+        </div></div>
+      </div></div>`);
+      const q=$('#ch-go-quote'); if(q) q.onclick=()=>openCharterOps('charter-quote',row);
+      const c=$('#ch-go-confirm'); if(c) c.onclick=()=>openCharterOps('charter-confirm',row);
+      return;
+    }
     const flightOpts=flights.map(fl=>`<option value="${esc(fl.id)}">${esc(fl.charter_no||fl.flight_no)} · ${esc(fl.origin)}→${esc(fl.destination)}</option>`).join('');
-    showModal('Charter passengers', `<div class="panel"><div class="panel-body">
-      <div class="table-wrap"><table><thead><tr><th>Name</th><th>Doc no</th><th>Seat</th><th>Ticket</th><th>Check-in</th></tr></thead><tbody>${rows}</tbody></table></div>
+    showModal('Charter passengers', `<div class="panel"><div class="panel-body">${listHtml}
       <h4 class="doc-section-title" style="margin-top:14px">Add passenger</h4>
-      <form id="f-charter-pax" class="form-grid"><div class="form-cols"><div><label>Flight</label><select name="charter_id">${flightOpts||'<option value="">Confirm the charter first</option>'}</select></div><div><label>Name *</label><input name="name" required></div></div>
+      <form id="f-charter-pax" class="form-grid"><div class="form-cols"><div><label>Flight</label><select name="charter_id">${flightOpts}</select></div><div><label>Name *</label><input name="name" required></div></div>
       <div class="form-cols"><div><label>Doc no</label><input name="doc_no"></div><div><label>Seat</label><input name="seat_no"></div></div>
       <div class="form-cols"><div><label>Meal</label><input name="meal_pref"></div><div><label>Ticket no</label><input name="ticket_number"></div></div>
       <div class="form-actions"><button type="submit" class="primary">Add passenger</button>${btn('Cancel','ghost','','data-action="modal-close"')}</div><div id="f-charter-pax-msg" class="small"></div></form>
     </div></div>`);
     const f=document.getElementById('f-charter-pax');
-    if(f) f.onsubmit=async ev=>{ ev.preventDefault(); const data=readFormData(f); const fid=data.charter_id||id; try{ await api(`/api/pss/charters/${fid}/passenger`,{method:'POST',body:JSON.stringify(data)}); hideModal(); toast('Passenger added'); openCharterOps('charter-passengers',row); }catch(e){ const m=document.getElementById('f-charter-pax-msg'); if(m){m.textContent=e.message;m.className='small error';} } };
+    if(f) f.onsubmit=async ev=>{ ev.preventDefault(); const data=readFormData(f); try{ await api(`/api/pss/charters/${data.charter_id}/passenger`,{method:'POST',body:JSON.stringify(data)}); hideModal(); toast('Passenger added'); openCharterOps('charter-passengers',row); }catch(e){ const m=document.getElementById('f-charter-pax-msg'); if(m){m.textContent=e.message;m.className='small error';} } };
     return;
   }
   if(action==='charter-complete'){

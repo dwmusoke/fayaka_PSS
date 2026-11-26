@@ -7146,7 +7146,7 @@ class Handler(BaseHTTPRequestHandler):
             if not q(conn, "SELECT 1 FROM pss_charter_flights WHERE id=? AND tenant_id=?", (cid, tenant_id), one=True):
                 first = q(conn, "SELECT id FROM pss_charter_flights WHERE request_id=? AND tenant_id=? ORDER BY id DESC LIMIT 1", (cid, tenant_id), one=True)
                 if not first:
-                    return self._json({'error': 'Confirm the charter before adding passengers'}, 400)
+                    return self._json({'error': 'Confirm the charter first (Quote then Confirm) before adding passengers'}, 400)
                 cid = first['id']
             conn.execute("""INSERT INTO pss_charter_passengers(tenant_id,charter_id,name,doc_no,seat_no,meal_pref,ticket_number,checkin_status,created_at,updated_at)
                             VALUES (?,?,?,?,?,?,?,'pending',?,?)""",
