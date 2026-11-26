@@ -176,6 +176,8 @@ USER_ROLES = ('owner','admin','accountant','reservations','agent','operations','
 
 def role_group(role):
     r = (role or '').strip().lower()
+    if r == 'super_admin':
+        return 'super_admin'
     if r in ('owner', 'admin'):
         return 'airline_admin'
     if r == 'accountant':
@@ -192,6 +194,7 @@ def role_group(role):
 
 
 ROLE_API = {
+    'super_admin': None,
     'airline_admin': None,
     'airline_accountant': ('/api/dashboard', '/api/analytics', '/api/revenue/', '/api/reports/', '/api/finance/', '/api/invoices',
                             '/api/credit-notes', '/api/payments', '/api/bills', '/api/expenses', '/api/loyalty/',
@@ -1001,7 +1004,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/api/onboarding/status' and method in ('GET', 'POST'):
                 return self.api_onboarding_status(tenant_id, method, user_id=user_id)
             if path == '/api/onboarding/create-tenant' and method == 'POST':
-                return self.api_onboarding_create_tenant(tenant_id, user_id)
+                return self.api_onboarding_create_tenant(tenant_id, user_id, sess=sess)
             if path == '/api/pss/disruptions/impact' and method == 'GET':
                 return self.api_disruption_impact(tenant_id, qs)
             if path == '/api/pss/disruptions/rebook' and method == 'POST':
@@ -2216,8 +2219,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_admin_tenants(self, sess=None):
         role = role_group((sess or {}).get('role'))
-        if role != 'airline_admin':
-            return self._json({'error': 'Access denied'}, 403)
+        if role != 'super_admin':
+            return self._json({'error': 'Only the SaaS super admin can view all tenants'}, 403)
         with db() as conn:
             rows = q(conn, """SELECT t.id, t.code, t.name, t.status, t.created_at,
                               (SELECT COUNT(*) FROM users u WHERE u.tenant_id=t.id) users,
@@ -8561,7 +8564,9 @@ class PartnerAPIHandler(Handler):
         return self._json({'progress': progress, 'counts': counts, 'checklist': checklist,
                            'completed': all(item['done'] for item in checklist)})
 
-    def api_onboarding_create_tenant(self, current_tenant_id, user_id):
+    def api_onboarding_create_tenant(self, current_tenant_id, user_id, sess=None):
+        if role_group((sess or {}).get('role')) != 'super_admin':
+            return self._json({'error': 'Only the SaaS super admin can provision airlines'}, 403)
         data = read_json(self)
         name = str(data.get('airline_name') or '').strip()
         code = str(data.get('code') or '').strip().upper()

@@ -1498,6 +1498,7 @@ window.printDocument = printDocument;
 
 function roleGroup(role){
   const r = String(role||'').toLowerCase();
+  if(r==='super_admin') return 'super_admin';
   if(['owner','admin'].includes(r)) return 'airline_admin';
   if(r==='accountant') return 'airline_accountant';
   if(['reservations','reservation','agent'].includes(r)) return 'airline_reservations';
@@ -1508,6 +1509,7 @@ function roleGroup(role){
 }
 
 const ROLE_VIEWS = {
+  super_admin: '*',
   airline_admin: '*',
   airline_accountant: ['dashboard','finance','invoicing','credit-notes','payments','revenue','refunds','coupons','vouchers','bank-accounts','bank-transactions','reconciliations','bills','expenses','journals','unused-tickets','fare-optimization','analytics','documents','shares','loyalty','tasks','notifications'],
   airline_reservations: ['dashboard','pss-overview','pss-flights','flight-inventory','pss-bookings','pss-checkins','pss-stock','agency-wallet','pss-eticket-tracker','pss-ticket-status','pss-agencies','pss-direct','pss-charters','pss-charter-flights','unused-tickets','fare-optimization','dispatch','crm','travelers','documents','shares','tasks','notifications','analytics','revenue'],
@@ -1517,13 +1519,13 @@ const ROLE_VIEWS = {
   viewer: ['dashboard','analytics']
 };
 const ROLE_HOME = {
-  airline_admin:'dashboard', airline_accountant:'dashboard', airline_reservations:'pss-overview',
+  super_admin:'airlines', airline_admin:'dashboard', airline_accountant:'dashboard', airline_reservations:'pss-overview',
   airline_operations:'pss-overview', agency_admin:'pss-workspace', agency_agent:'pss-workspace', viewer:'dashboard'
 };
 
 function currentGroup(){ return roleGroup(state.session?.role); }
 function allowedViews(){ return ROLE_VIEWS[currentGroup()] || ROLE_VIEWS.viewer; }
-function canView(name){ const a = allowedViews(); return a === '*' || a.includes(name); }
+function canView(name){ const a = allowedViews(); return (a === '*' || a.includes(name)) && (name !== 'airlines' || currentGroup() === 'super_admin'); }
 
 function applyRoleNav(){
   const allowed = allowedViews();
@@ -2820,7 +2822,7 @@ async function render_onboarding(el){
   let notes = {};
   try{ notes = typeof rawNotes==='string' ? JSON.parse(rawNotes||'{}') : (rawNotes||{}); }catch(e){ notes = {}; }
   const rows = d.checklist.map(c=>`<tr><td>${esc(c.label)}</td><td>${c.done?'<span class="badge good">ready</span>':'<span class="badge warn">pending</span>'}</td><td><button class="mini-btn secondary onboarding-go" data-view="${esc(c.path)}">Open</button></td></tr>`).join('');
-  const canProvision = currentGroup()==='airline_admin';
+  const canProvision = currentGroup()==='super_admin';
   el.innerHTML = pageHead('Airline onboarding', 'Launch a new airline tenant and track launch readiness', '')
     + `<div class="kpi-grid">${kpi('Readiness',`${d.checklist.filter(c=>c.done).length}/${d.checklist.length}`,'task',d.completed?'ready to launch':'setup incomplete')}${kpi('Users',fmt(d.counts.users),'users','team accounts')}${kpi('Flights',fmt(d.counts.flights),'booking','scheduled flights')}${kpi('API keys',fmt(d.counts.api_keys),'setting','partner access')}</div>`
     + panel('Launch checklist', `<table><thead><tr><th>Step</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody></table>`, '', `Current step: ${esc(d.progress?.step||'profile')}`)

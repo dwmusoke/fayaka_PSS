@@ -2088,6 +2088,17 @@ def db_cleanup_expired_sessions(conn):
     conn.execute("DELETE FROM sessions WHERE expires_at <= ?", (time.time(),))
 
 
+def ensure_super_admin(conn):
+    try:
+        if q(conn, "SELECT 1 FROM users WHERE role='super_admin' LIMIT 1", one=True):
+            return
+        row = q(conn, "SELECT id FROM users WHERE tenant_id=1 AND username='admin' ORDER BY id LIMIT 1", one=True)
+        if row:
+            conn.execute("UPDATE users SET role='super_admin' WHERE id=?", (row['id'],))
+    except Exception:
+        pass
+
+
 def init_db():
     with db() as conn:
         conn.executescript(SCHEMA)
@@ -2108,6 +2119,7 @@ def init_db():
                          (1, SEED_RUN_KEY, '1', now_iso()))
         else:
             _bootstrap_admin_password(conn)
+        ensure_super_admin(conn)
 
 
 def _add_columns(conn, table, cols):
