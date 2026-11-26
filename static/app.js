@@ -2,6 +2,7 @@ const state = { session: null, plan: null, usage: null, branding: null, cache: {
 const LIST_PAGES = {};
 const PAGE_SIZE = 12;
 const INVENTORY_UI = { tab: 'dates', date: '', pos: 'ALL', subclass: 'ALL', poll: null, pollKey: '', cache: {} };
+let brandingCache = null;
 function stopInventoryPoll(){ if(INVENTORY_UI.poll){ clearInterval(INVENTORY_UI.poll); INVENTORY_UI.poll = null; } }
 
 const $ = (s, r=document) => r.querySelector(s);
@@ -1011,24 +1012,40 @@ function shareButtons(url,title,recipient=''){
     <button type="button" class="doc-share-btn secondary" onclick="copyShare('${esc(url)}')">Copy link</button>
   </div>`;
 }
-function openPdfViewer(url, title){
+async function openPdfViewer(url, title){
+  let branding = brandingCache;
+  if(!branding){
+    try{ const r = await api('/api/branding'); branding = r || {}; brandingCache = branding; }catch(e){ branding = {}; brandingCache = {}; }
+  }
+  const logoData = branding.logo_data || '';
+  const logoImg = logoData ? `<img src="${logoData}" class="pdf-brand-logo" alt="logo">` : `<div class="pdf-brand-mark">${((branding.logo_text||(branding.company_name||'FA')||'FA').toUpperCase().slice(0,2))}</div>`;
+  const company = esc(branding.company_name||branding.tenant_name||'Fayaka Airways');
+  const legal = esc(branding.legal_name||'');
+  const addrParts = [branding.address||branding.location, branding.phone, branding.email, branding.website].filter(Boolean);
+  const addr = esc(addrParts.join(' · '));
+  const docTitle = esc(title||'Document preview');
   let m = $('#admin-pdf-viewer');
   if(!m){
     m = document.createElement('div');
     m.id = 'admin-pdf-viewer';
     m.className = 'modal pdf-viewer-modal hidden';
-    m.innerHTML = `<div class="modal-card"><div class="modal-head"><div><h3 id="admin-pdf-title">Document preview</h3><div class="muted tiny" id="admin-pdf-sub"></div></div>
-      <button type="button" class="mini-btn secondary" onclick="closePdfViewer()">Close</button></div>
+    m.innerHTML = `<div class="modal-card pdf-brand-card"><div class="pdf-brand-head"><div class="pdf-brand-left">${logoImg}<div class="pdf-brand-text"><div class="pdf-brand-company">${company}</div><div class="pdf-brand-legal">${legal}</div><div class="pdf-brand-addr">${addr}</div></div></div><div class="pdf-brand-right"><div class="pdf-brand-doc">${docTitle}</div><div class="pdf-brand-muted">Premium Travel Document</div></div></div><div class="pdf-brand-close"><button type="button" class="mini-btn secondary" onclick="closePdfViewer()">Close</button></div></div>
       <iframe id="admin-pdf-frame" class="pdf-frame" title="Document preview"></iframe>
       <div class="pdf-viewer-actions"><button type="button" class="mini-btn primary" id="admin-pdf-print">Print</button>
         <button type="button" class="mini-btn secondary" id="admin-pdf-share">Share</button>
         <button type="button" class="mini-btn secondary" id="admin-pdf-download">Download</button></div></div>`;
     document.body.appendChild(m);
     m.addEventListener('click', e=>{ if(e.target===m) closePdfViewer(); });
+  } else {
+    $( '.pdf-brand-company', m).textContent = company;
+    $('.pdf-brand-legal', m).textContent = legal;
+    $('.pdf-brand-addr', m).textContent = addr;
+    $('.pdf-brand-doc', m).textContent = docTitle;
+    const logoWrap = $('.pdf-brand-left', m);
+    if(logoWrap) logoWrap.innerHTML = logoImg + `<div class="pdf-brand-text"><div class="pdf-brand-company">${company}</div><div class="pdf-brand-legal">${legal}</div><div class="pdf-brand-addr">${addr}</div></div>`;
+    $('.pdf-brand-doc', m).textContent = docTitle;
   }
   const frame = $('#admin-pdf-frame', m);
-  $('#admin-pdf-title', m).textContent = title || 'Document preview';
-  $('#admin-pdf-sub', m).textContent = url.split('?')[0];
   frame.src = url;
   m.classList.remove('hidden');
   $('#admin-pdf-print', m).onclick = ()=>{ try{ frame.contentWindow.focus(); frame.contentWindow.print(); }catch(e){ toast('Use the browser print dialog','error'); } };

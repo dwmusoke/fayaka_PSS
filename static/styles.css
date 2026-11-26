@@ -581,3 +581,21 @@ html[data-theme="dark"] .profile-avatar { color: #08111f; }
 .action-menu button:hover{ background: #f8fafc; color: #0f172a; }
 .action-menu button.danger{ color: #b91c1c; }
 .action-menu button.danger:hover{ background: #fef2f2; color: #991b1b; }
+
+/* Premium document preview branding header */
+.pdf-brand-card { border: 0; }
+.pdf-brand-head { display: flex; align-items: center; gap: 14px; padding: 14px 16px; border-bottom: 1px solid #e2e8f0; background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%); border-radius: 10px 10px 0 0; }
+.pdf-brand-left { display: flex; align-items: center; gap: 12px; flex: 1; }
+.pdf-brand-logo { width: 44px; height: 44px; border-radius: 8px; object-fit: contain; background: #fff; border: 1px solid #e2e8f0; padding: 6px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+.pdf-brand-mark { width: 44px; height: 44px; border-radius: 8px; background: linear-gradient(135deg, #206090 0%, #1d4ed8 100%); color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 16px; letter-spacing: .5px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+.pdf-brand-text { display: flex; flex-direction: column; gap: 2px; }
+.pdf-brand-company { font-weight: 800; font-size: 15px; color: #0f172a; letter-spacing: .2px; }
+.pdf-brand-legal { font-size: 11px; color: #64748b; font-weight: 600; }
+.pdf-brand-addr { font-size: 10.5px; color: #94a3b8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 320px; }
+.pdf-brand-right { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; margin-left: auto; }
+.pdf-brand-doc { font-weight: 700; font-size: 14px; color: #0f172a; white-space: nowrap; }
+.pdf-brand-muted { font-size: 10px; color: #64748b; text-transform: uppercase; letter-spacing: .6px; }
+.pdf-brand-close { display: flex; align-items: center; }
+.pdf-viewer-modal .modal-card { border-radius: 10px; overflow: hidden; }
+.pdf-frame { width: 100%; height: 72vh; border: 0; background: #fff; display: block; }
+.pdf-viewer-actions { display: flex; gap: 8px; padding: 10px 16px; border-top: 1px solid #e2e8f0; background: #f8fafc; justify-content: flex-end; border-radius: 0 0 10px 10px; }
