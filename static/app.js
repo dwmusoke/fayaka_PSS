@@ -442,6 +442,11 @@ function readFormData(form){
     if(!name) return;
     try{ data[name] = JSON.parse(el.value); }catch(e){ /* keep raw text */ }
   });
+  $$('.json-text-input', form).forEach(el=>{
+    const name = el.getAttribute('name');
+    if(!name) return;
+    try{ data[name] = JSON.stringify(JSON.parse(el.value)); }catch(e){ /* keep raw text */ }
+  });
   return data;
 }
 function schemaPayload(form,schema){
@@ -591,7 +596,9 @@ const CREATE_SCHEMAS = {
 };
 const PROTECTED_FIELDS = new Set(['id','tenant_id','created_at','updated_at','created_by','updated_by','last_viewed_at','views','token']);
 function isJsonValue(v){ return v!==null && v!==undefined && (typeof v==='object') && (Array.isArray(v) || v.constructor===Object); }
-function prettyJson(v){ try{ return JSON.stringify(v, null, 2); }catch(e){ return String(v); } }
+function isJsonString(v){ if(typeof v!=='string' || !/^\s*[\{\[]/.test(v)) return false; try{ JSON.parse(v); return true; }catch(e){ return false; } }
+function prettyJson(v){ try{ return JSON.stringify(typeof v==='string'?JSON.parse(v):v, null, 2); }catch(e){ return typeof v==='string'?v:JSON.stringify(v); } }
+function jsonBlock(v){ return `<details class="json-block"><summary>JSON data</summary><pre>${esc(prettyJson(v))}</pre></details>`; }
 function inputFor(key, val, required){
   const t = FIELD_TYPES[key] || (typeof val==='number'?'number':(typeof val==='boolean'?'checkbox':'text'));
   const v = val===null||val===undefined?'':esc(val);
@@ -599,6 +606,7 @@ function inputFor(key, val, required){
   const checked = (val===true||val===1||val==='1')?' checked':'';
   if(PROTECTED_FIELDS.has(key) && t!=='hidden') return `<input type="text" class="protected-input" value="${esc(isJsonValue(val)?prettyJson(val):(val??'—'))}" readonly title="System-managed field — cannot be edited">`;
   if(isJsonValue(val)) return `<textarea name="${esc(key)}" rows="4" class="json-input" placeholder="JSON">${esc(prettyJson(val))}</textarea>`;
+  if(isJsonString(val)) return `<textarea name="${esc(key)}" rows="4" class="json-text-input" placeholder="JSON">${esc(prettyJson(val))}</textarea>`;
   if(t==='hidden') return `<input type="hidden" name="${esc(key)}" value="${v}">`;
   if(t==='checkbox') return `<label class="checkbox-row"><input type="checkbox" name="${esc(key)}"${checked}> ${esc(key.replace(/[_]/g,' '))}</label>`;
   if(t==='select'){
@@ -622,6 +630,7 @@ function cellFor(key, val){
     return `<a class="id-link" href="#" data-key="${esc(key)}" data-val="${esc(String(val))}">${esc(val)}</a>`;
   }
   if(val===null||val===undefined||val==='') return `<span class="muted">-</span>`;
+  if(isJsonValue(val) || isJsonString(val)) return jsonBlock(val);
   return esc(val);
 }
 async function apiDelete(path,id){
