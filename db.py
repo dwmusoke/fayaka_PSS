@@ -257,6 +257,7 @@ class _SQLiteConn:
 
 
 def get_conn():
+    global PG_POOL
     if USING_POSTGRES:
         _init_pg_pool()
         if PG_POOL is not None:
