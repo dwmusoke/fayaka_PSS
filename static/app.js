@@ -1014,6 +1014,7 @@ function shareButtons(url,title,recipient=''){
   </div>`;
 }
 async function openPdfViewer(url, title){
+  hideModal();
   let branding = brandingCache;
   if(!branding){
     try{ const r = await api('/api/branding'); branding = r || {}; brandingCache = branding; }catch(e){ branding = {}; brandingCache = {}; }
@@ -1030,7 +1031,7 @@ async function openPdfViewer(url, title){
     m = document.createElement('div');
     m.id = 'admin-pdf-viewer';
     m.className = 'modal pdf-viewer-modal hidden';
-    m.innerHTML = `<div class="modal-card pdf-brand-card"><div class="pdf-brand-head"><div class="pdf-brand-left">${logoImg}<div class="pdf-brand-text"><div class="pdf-brand-company">${company}</div><div class="pdf-brand-legal">${legal}</div><div class="pdf-brand-addr">${addr}</div></div></div><div class="pdf-brand-right"><div class="pdf-brand-doc">${docTitle}</div><div class="pdf-brand-muted">Premium Travel Document</div></div></div><div class="pdf-brand-close"><button type="button" class="mini-btn secondary" onclick="closePdfViewer()">Close</button></div></div>
+    m.innerHTML = `<div class="modal-card pdf-brand-card"><div class="pdf-brand-head"><div class="pdf-brand-left">${logoImg}<div class="pdf-brand-text"><div class="pdf-brand-company">${company}</div><div class="pdf-brand-legal">${legal}</div><div class="pdf-brand-addr">${addr}</div></div></div><div class="pdf-brand-right"><div class="pdf-brand-doc">${docTitle}</div><div class="pdf-brand-muted">Premium Travel Document</div></div><div class="pdf-brand-close"><button type="button" class="mini-btn secondary" onclick="closePdfViewer()">Close</button></div></div>
       <iframe id="admin-pdf-frame" class="pdf-frame" title="Document preview"></iframe>
       <div class="pdf-viewer-actions"><button type="button" class="mini-btn primary" id="admin-pdf-print">Print</button>
         <button type="button" class="mini-btn secondary" id="admin-pdf-share">Share</button>

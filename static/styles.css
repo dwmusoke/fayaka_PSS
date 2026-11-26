@@ -595,7 +595,7 @@ html[data-theme="dark"] .profile-avatar { color: #08111f; }
 .pdf-brand-right { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; margin-left: auto; }
 .pdf-brand-doc { font-weight: 700; font-size: 14px; color: #0f172a; white-space: nowrap; }
 .pdf-brand-muted { font-size: 10px; color: #64748b; text-transform: uppercase; letter-spacing: .6px; }
-.pdf-brand-close { display: flex; align-items: center; }
-.pdf-viewer-modal .modal-card { border-radius: 10px; overflow: hidden; }
-.pdf-frame { width: 100%; height: 72vh; border: 0; background: #fff; display: block; }
-.pdf-viewer-actions { display: flex; gap: 8px; padding: 10px 16px; border-top: 1px solid #e2e8f0; background: #f8fafc; justify-content: flex-end; border-radius: 0 0 10px 10px; }
+.pdf-brand-close { display: flex; align-items: center; flex: 0 0 auto; }
+.pdf-viewer-modal .modal-card { border-radius: 12px; overflow: hidden; }
+.pdf-viewer-modal .pdf-frame { flex: 1 1 auto; width: 100%; min-height: 0; border: 0; background: #fff; display: block; }
+.pdf-viewer-actions { display: flex; gap: 8px; padding: 10px 16px; border-top: 1px solid #e2e8f0; background: #f8fafc; justify-content: flex-end; }
