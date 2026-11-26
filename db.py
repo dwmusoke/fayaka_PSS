@@ -258,7 +258,7 @@ class _SQLiteConn:
 
 def get_conn():
     global PG_POOL
-    if USING_POSTGRES:
+    if USING_POSTGRES and psycopg is not None:
         _init_pg_pool()
         if PG_POOL is not None:
             try:
@@ -266,11 +266,12 @@ def get_conn():
                 return _PGConn(conn)
             except Exception:
                 PG_POOL = None
-        if psycopg is None:
-            raise RuntimeError("psycopg (Postgres driver) is not installed. Set DATABASE_URL/SUPABASE_DB_URL and add psycopg to dependencies, or unset REQUIRE_POSTGRES.")
         conn = psycopg.connect(DATABASE_URL, autocommit=False, row_factory=dict_row)
         return _PGConn(conn)
-    if REQUIRE_POSTGRES:
+    # Not using Postgres, or Postgres driver unavailable
+    if USING_POSTGRES:
+        print("[db] WARNING: Postgres driver unavailable; falling back to SQLite", file=sys.stderr)
+    if REQUIRE_POSTGRES and not DATABASE_URL:
         raise RuntimeError(
             "DATABASE_URL/SUPABASE_DB_URL is required in Railway/production. "
             "Refusing SQLite fallback to prevent ephemeral data loss."
