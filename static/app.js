@@ -2793,10 +2793,22 @@ async function render_onboarding(el){
   $$('.onboarding-go',el).forEach(b=>b.onclick=()=>{ if(canView(b.dataset.view)) setView(b.dataset.view); else toast('Your role cannot open this setup view','error'); });
   const tenantForm = $('#f-new-tenant');
   if(tenantForm) tenantForm.onsubmit = async (e)=>{
-    e.preventDefault(); const data=Object.fromEntries(new FormData(e.target).entries());
-    try{ const r=await api('/api/onboarding/create-tenant',{method:'POST',body:JSON.stringify(data)});
-      showModal('Airline created', `<p>Save these credentials now.</p><pre>${esc(JSON.stringify(r,null,2))}</pre><button class="mini-btn" onclick="hideModal()">Done</button>`); render_onboarding(el);
-    }catch(err){ $('#f-new-tenant-msg').textContent=err.message; }
+    e.preventDefault();
+    const data=Object.fromEntries(new FormData(e.target).entries());
+    const msg=$('#f-new-tenant-msg'); if(msg){ msg.textContent='Provisioning…'; msg.className='small'; }
+    const submit=e.target.querySelector('button[type="submit"]'); if(submit) submit.disabled=true;
+    try{
+      const r=await api('/api/onboarding/create-tenant',{method:'POST',body:JSON.stringify(data)});
+      const creds=JSON.stringify(r,null,2);
+      showModal('Airline created', `<p><b>Save these credentials now.</b> The password is not shown again.</p><pre>${esc(creds)}</pre>
+        <div class="cta-row"><button class="mini-btn secondary" id="copy-airline-creds">Copy credentials</button><button class="mini-btn primary" id="create-another-airline">Create another airline</button><button class="mini-btn" onclick="hideModal()">Done</button></div>`);
+      const copy=$('#copy-airline-creds'); if(copy) copy.onclick=async()=>{ try{ await navigator.clipboard.writeText(creds); toast('Credentials copied'); }catch(e){ window.prompt('Copy credentials', creds); } };
+      const again=$('#create-another-airline'); if(again) again.onclick=()=>{ hideModal(); const f=$('#f-new-tenant'); if(f){ f.reset(); f.scrollIntoView({behavior:'smooth'}); f.querySelector('input')?.focus(); } };
+      render_onboarding(el);
+    }catch(err){
+      if(msg){ msg.textContent=err.message; msg.className='small error'; }
+      toast(err.message,'error');
+    }finally{ if(submit) submit.disabled=false; }
   };
   $('#f-onboarding-note').onsubmit = async (e)=>{
     e.preventDefault(); const data=Object.fromEntries(new FormData(e.target).entries());
