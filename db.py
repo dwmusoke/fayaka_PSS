@@ -266,6 +266,8 @@ def get_conn():
                 return _PGConn(conn)
             except Exception:
                 PG_POOL = None
+        if psycopg is None:
+            raise RuntimeError("psycopg (Postgres driver) is not installed. Set DATABASE_URL/SUPABASE_DB_URL and add psycopg to dependencies, or unset REQUIRE_POSTGRES.")
         conn = psycopg.connect(DATABASE_URL, autocommit=False, row_factory=dict_row)
         return _PGConn(conn)
     if REQUIRE_POSTGRES:
