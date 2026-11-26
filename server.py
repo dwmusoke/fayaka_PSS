@@ -1397,7 +1397,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/api/documents' and method == 'POST':
                 return self.api_document_create(tenant_id, user_id)
             if path.startswith('/api/documents/') and path.endswith('/download') and method == 'GET':
-                return self.api_document_download(tenant_id, path.split('/')[3])
+                return self.api_document_download(tenant_id, path.split('/')[3], qs)
             if path.startswith('/api/documents/') and method in ('PUT', 'DELETE'):
                 return self.api_document_mutate(tenant_id, path.rsplit('/', 1)[-1], method)
             if path == '/api/shares' and method == 'GET':
@@ -4147,7 +4147,7 @@ class Handler(BaseHTTPRequestHandler):
             log_audit(conn, tenant_id, user_id, 'upload', 'document', did, {'title': data.get('title')})
         return self._json({'ok': True, 'document_id': did})
 
-    def api_document_download(self, tenant_id, did):
+    def api_document_download(self, tenant_id, did, qs=None):
         did = self._oid(did)
         with db() as conn:
             row = q(conn, "SELECT * FROM documents WHERE id=? AND tenant_id=?", (did, tenant_id), one=True)
@@ -4155,8 +4155,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({'error': 'Document not found'}, 404)
         payload = row.get('file_data') if row.get('file_data') else (row.get('content_text') or '').encode('utf-8')
         fname = (row.get('file_name') or (row.get('title') or 'document')).replace('"', '')
+        force_dl = str((qs or {}).get('download', ['0'])[0]).lower() in ('1','true','yes')
+        disp = 'attachment' if force_dl else 'inline'
         return self._send(payload, 200, row.get('mime_type') or 'application/octet-stream',
-                          {'Content-Disposition': f'attachment; filename="{fname}"'})
+                          {'Content-Disposition': f'{disp}; filename="{fname}"'})
 
     def api_document_mutate(self, tenant_id, did, method):
         did = self._oid(did)

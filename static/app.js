@@ -807,9 +807,10 @@ async function renderList(name, el, pageArg){
       try{
         const dd = await api(`/api/documents?ref_id=${encodeURIComponent(id)}&view=${encodeURIComponent(name)}`);
         const items = dd.documents || dd || [];
-        const body = Array.isArray(items)&&items.length?table(['id','doc_type','created_at'], items, (r,c)=>c==='doc_type'?statusBadge(r[c]):cellFor(c,r[c]), (r)=>`<button class="mini-btn" data-action="download-doc" data-id="${r.id}">Download</button>`):`<div class="empty">No documents found</div>`;
+        const body = Array.isArray(items)&&items.length?table(['id','doc_type','created_at'], items, (r,c)=>c==='doc_type'?statusBadge(r[c]):cellFor(c,r[c]), (r)=>`<div class="actions-cell"><button class="mini-btn secondary" data-action="view-doc" data-id="${r.id}" data-title="${esc(r.doc_type||r.title||'Document')}">View</button><button class="mini-btn" data-action="download-doc" data-id="${r.id}">Download</button></div>`):`<div class="empty">No documents found</div>`;
         showModal('Documents', body);
-        $$('#modal-body [data-action="download-doc"]').forEach(b=>{ b.onclick = ()=> window.open(`/api/documents/${b.getAttribute('data-id')}/download`, '_blank'); });
+        $$('#modal-body [data-action="view-doc"]').forEach(b=>{ b.onclick = ()=> openPdfViewer(`/api/documents/${b.getAttribute('data-id')}/download`, b.getAttribute('data-title')||'Document'); });
+        $$('#modal-body [data-action="download-doc"]').forEach(b=>{ b.onclick = ()=>{ const a=document.createElement('a'); a.href=`/api/documents/${b.getAttribute('data-id')}/download?download=1`; a.download=''; document.body.appendChild(a); a.click(); a.remove(); }; });
       }catch(err){ toast(err.message,'error'); }
     };
   });
@@ -863,7 +864,7 @@ async function renderList(name, el, pageArg){
       if(itemAction==='share'){ shareFromAction(name, row, d.share_base||''); return; }
       if(itemAction==='duplicate'){ el.querySelector(`[data-action="duplicate"][data-id="${CSS.escape(id)}"]`)?.click(); return; }
       if(itemAction==='ticket'){ el.querySelector(`[data-action="ticket"][data-id="${CSS.escape(id)}"]`)?.click(); return; }
-      if(itemAction==='pdf'||itemAction==='receipt'){ const pdf = btn.getAttribute('data-pdf')||itemAction; window.open(`/api/documents/${pdf}?id=${encodeURIComponent(id)}`, '_blank'); return; }
+      if(['pdf','receipt','statement','boardingpass','itinerary','voucher','booking-confirmation','credit-note','quotation','journeypass'].includes(itemAction) || btn.getAttribute('data-pdf')){ const pdf = btn.getAttribute('data-pdf')||itemAction; openPdfViewer(`/api/documents/${pdf}?id=${encodeURIComponent(id)}`, row.ref||row.title||pdf.replace(/-/g,' ').replace(/\b\w/g,c=>c.toUpperCase())); return; }
       if(itemAction==='post'){ try{ await api(path+'/'+encodeURIComponent(id)+'/post',{method:'POST',body:'{}'}); toast('Posted'); renderList(name,el); }catch(err){ toast(err.message,'error'); } return; }
       if(itemAction==='refund'){ try{ await api(path+'/'+encodeURIComponent(id)+'/refund',{method:'POST',body:'{}'}); toast('Refunded'); renderList(name,el); }catch(err){ toast(err.message,'error'); } return; }
       toast(`${itemAction} not implemented for this view`, 'error');
@@ -1067,6 +1068,13 @@ function closePdfViewer(){
   m.classList.add('hidden');
   const frame = $('#admin-pdf-frame', m);
   if(frame) frame.src = 'about:blank';
+}
+async function shareFromAction(view, row, shareBase){
+  const ref = row.pnr||row.booking_ref||row.sale_no||row.ref||row.id||'';
+  const title = `${(view||'record').replace(/-/g,' ')} ${ref}`.trim();
+  const url = shareBase ? (location.origin + shareBase + (String(shareBase).includes('?')?'&':'?') + 'id=' + encodeURIComponent(row.id||'')) : (location.origin + location.pathname + '#' + encodeURIComponent(view||'') + '/' + encodeURIComponent(row.id||''));
+  try{ if(navigator.share){ await navigator.share({title, url}); return; } }catch(e){}
+  try{ await navigator.clipboard.writeText(url); toast('Link copied'); }catch(e){ window.prompt('Copy link', url); }
 }
 window.closePdfViewer = closePdfViewer;
 document.addEventListener('keydown', e=>{ if(e.key==='Escape') closePdfViewer(); });
