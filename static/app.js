@@ -745,7 +745,7 @@ async function renderList(name, el, pageArg){
     const ref = r.invoice_no||r.payment_no||r.pnr||r.sale_no||r.offer_no||r.order_no||r.name||r.title||r[idKey]||'';
     if(modern && mode==='card') return modernRecordCard(name, r, rid, ref, defs);
     const cells = headCols.map(c=>`<td data-field="${esc(c)}" title="${esc(String(r[c]??''))}">${cellFor(c,r[c])}</td>`).join('');
-    const menuItems = defs.length?defs.map(a=>`<button data-action="item" data-item-action="${esc(typeof a==='string'?a:(a&&a.action))}" data-id="${rid}" data-name="${esc(String(ref))}">${actionLabel(a)}</button>`).join(''):'';
+    const menuItems = defs.length?defs.map(a=>`<button data-action="item" data-item-action="${esc(typeof a==='string'?a:(a&&a.action))}" data-id="${rid}" data-name="${esc(String(ref))}"${a&&a.pdf?` data-pdf="${esc(a.pdf)}"`:''}>${actionLabel(a)}</button>`).join(''):'';
     return `<tr data-view="${esc(name)}" data-path="${esc(path)}" data-id="${esc(rid)}">${cells}<td class="actions-cell"><div class="action-menu-wrap"><button class="mini-btn" data-action="menu">⋯</button><div class="action-menu hidden">${menuItems||'<span class="muted">No actions</span>'}</div></div></td></tr>`;
   }).join('');
   const pageMeta = allRows.length ? `<div class="small muted">Showing ${((page - 1) * PAGE_SIZE) + 1}-${Math.min(page * PAGE_SIZE, allRows.length)} of ${allRows.length}</div>` : '';
@@ -864,7 +864,7 @@ async function renderList(name, el, pageArg){
       if(itemAction==='share'){ shareFromAction(name, row, d.share_base||''); return; }
       if(itemAction==='duplicate'){ el.querySelector(`[data-action="duplicate"][data-id="${CSS.escape(id)}"]`)?.click(); return; }
       if(itemAction==='ticket'){ el.querySelector(`[data-action="ticket"][data-id="${CSS.escape(id)}"]`)?.click(); return; }
-      if(['pdf','receipt','statement','boardingpass','itinerary','voucher','booking-confirmation','credit-note','quotation','journeypass'].includes(itemAction) || btn.getAttribute('data-pdf')){ const pdf = btn.getAttribute('data-pdf')||itemAction; openPdfViewer(`/api/documents/${pdf}?id=${encodeURIComponent(id)}`, row.ref||row.title||pdf.replace(/-/g,' ').replace(/\b\w/g,c=>c.toUpperCase())); return; }
+      if(['pdf','receipt','statement','boardingpass','itinerary','voucher','booking-confirmation','credit-note','quotation','journeypass'].includes(itemAction) || btn.getAttribute('data-pdf')){ const pdf = btn.getAttribute('data-pdf')||itemAction; openPdfViewer(`/api/documents/pdf/${pdf}/${encodeURIComponent(id)}`, row.ref||row.title||pdf.replace(/-/g,' ').replace(/\b\w/g,c=>c.toUpperCase())); return; }
       if(itemAction==='post'){ try{ await api(path+'/'+encodeURIComponent(id)+'/post',{method:'POST',body:'{}'}); toast('Posted'); renderList(name,el); }catch(err){ toast(err.message,'error'); } return; }
       if(itemAction==='refund'){ try{ await api(path+'/'+encodeURIComponent(id)+'/refund',{method:'POST',body:'{}'}); toast('Refunded'); renderList(name,el); }catch(err){ toast(err.message,'error'); } return; }
       toast(`${itemAction} not implemented for this view`, 'error');
