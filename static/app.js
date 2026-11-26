@@ -261,6 +261,7 @@ const VIEW_ACTIONS = {
   'pss-bookings':[{label:'View',action:'view'},{label:'Edit',action:'edit'},{label:'Ticket',action:'ticket'},{label:'Itinerary',action:'pdf',pdf:'itinerary'},{label:'Booking confirmation',action:'pdf',pdf:'booking-confirmation'},{label:'Travel documents',action:'travel-docs'},{label:'Documents',action:'docs'},{label:'Share',action:'share'},{label:'Cancel',action:'cancel',danger:true}],
   'pss-charters':[{label:'View',action:'view'},{label:'Quote',action:'charter-quote'},{label:'Confirm',action:'charter-confirm'},{label:'Passengers',action:'charter-passengers'},{label:'Complete',action:'charter-complete'},{label:'Edit',action:'edit'},{label:'Delete',action:'delete',danger:true}],
   'pss-charter-flights':[{label:'View',action:'view'},{label:'Edit',action:'edit'},{label:'Delete',action:'delete',danger:true}],
+  'pss-agencies':[{label:'View',action:'view'},{label:'Edit',action:'edit'},{label:'Wallet & stock',action:'goto-agency-wallet'},{label:'Allocate stock',action:'goto-stock'},{label:'Partner login',action:'goto-partner-users'},{label:'Delete',action:'delete',danger:true}],
   'pss-payments':[{label:'View',action:'view'},{label:'Receipt',action:'receipt',pdf:'receipt'},{label:'Edit',action:'edit'},{label:'Share',action:'share'},{label:'Refund',action:'refund',danger:true}],
   crm:[{label:'View',action:'view'},{label:'Edit',action:'edit'},{label:'Statement',action:'statement',pdf:'customer'},{label:'Travel documents',action:'travel-docs'},{label:'Share',action:'share'}],
   travelers:[{label:'View',action:'view'},{label:'Edit',action:'edit'},{label:'Statement',action:'statement',pdf:'traveler'},{label:'Travel documents',action:'travel-docs'},{label:'Share',action:'share'}]
@@ -545,6 +546,11 @@ const CREATE_SCHEMAS = {
     txt('username',true),pwd('password'),txt('full_name'),txt('email'),
     sel('role',['agency','station','checkin'],false,'agency'),sel('status',STATUS_ACTIVE,false,'active'),
     num('agency_id'),txt('station_code'),num('branch_id')
+  ]},
+  'pss-agencies':{fields:[
+    txt('code',true),txt('name',true),txt('contact_email'),txt('contact_phone'),
+    num('commission_rate'),txt('allowed_channels'),txt('login_token'),
+    sel('status',STATUS_ACTIVE,false,'active'),area('notes')
   ]},
   'pss-flights':{fields:[
     txt('flight_no',true),txt('origin',true),txt('destination',true),
@@ -959,12 +965,19 @@ async function renderList(name, el, pageArg){
       if(itemAction==='refund'){ openRefund(id); return; }
       if(itemAction==='travel-docs'){ openBookingDocuments(name, row); return; }
       if(['charter-quote','charter-confirm','charter-passengers','charter-complete'].includes(itemAction)){ openCharterOps(itemAction, row); return; }
+      if(itemAction==='goto-agency-wallet'){ setView('agency-wallet'); return; }
+      if(itemAction==='goto-stock'){ setView('pss-stock'); return; }
+      if(itemAction==='goto-partner-users'){ setView('pss-partner-users'); return; }
       toast(`${itemAction} not implemented for this view`, 'error');
     };
   });
   el.querySelectorAll('[data-action="travel-docs"]').forEach(b=>{ b.onclick=()=>openBookingDocuments(name, rows.find(x=>String(x[idKey])===String(b.getAttribute('data-id')))||{id:b.getAttribute('data-id')}); });
   ['charter-quote','charter-confirm','charter-passengers','charter-complete'].forEach(a=>{
     el.querySelectorAll(`[data-action="${a}"]`).forEach(b=>{ b.onclick=()=>openCharterOps(a, rows.find(x=>String(x[idKey])===String(b.getAttribute('data-id')))||{id:b.getAttribute('data-id')}); });
+  });
+  const gotoMap={'goto-agency-wallet':'agency-wallet','goto-stock':'pss-stock','goto-partner-users':'pss-partner-users'};
+  Object.entries(gotoMap).forEach(([a,target])=>{
+    el.querySelectorAll(`[data-action="${a}"]`).forEach(b=>{ b.onclick=()=>setView(target); });
   });
   ['pdf','receipt','statement','boardingpass','itinerary','voucher','booking-confirmation','credit-note','quotation','journeypass'].forEach(a=>{
     el.querySelectorAll(`[data-action="${a}"]`).forEach(btn=>{
@@ -2791,11 +2804,13 @@ async function render_airlines(el){
         <div class="table-wrap"><table><thead><tr><th>ID</th><th>Code</th><th>Name</th><th>Status</th><th>Plan</th><th>Users</th><th>Flights</th><th>Created</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
       </div></div>`;
     $('#airlines-go-onboarding',el).onclick=()=>setView('onboarding');
-    $$('[data-tenant-login]',el).forEach(b=>b.onclick=()=>{
+    $$('[data-tenant-login]',el).forEach(b=>b.onclick=async()=>{
       const code=b.getAttribute('data-tenant-login');
-      const form=$('#login-form');
-      if(form && form.elements.tenant){ form.elements.tenant.value=code; form.elements.username?.focus(); toast(`Tenant set to ${code} — enter admin credentials`); }
-      else toast(`Use tenant code ${code} on the login screen`);
+      try{ await api('/api/logout',{method:'POST',body:'{}'}); }catch(e){}
+      state.session=null;
+      try{ sessionStorage.setItem('switchTenant',code); }catch(e){}
+      showLogin();
+      toast(`Enter credentials for tenant ${code}`);
     });
   }catch(e){ el.innerHTML=`${pageHead(meta[0],meta[1],'')}<div class="panel"><div class="panel-body error">${esc(e.message||String(e))}</div></div>`; }
 }
@@ -3073,6 +3088,13 @@ async function renderPssStock(el){
 function showLogin(){
   const main = $('#main-view'); if(main) main.classList.add('hidden');
   const login = $('#login-view'); if(login) login.classList.remove('hidden');
+  const form = $('#login-form');
+  if(form){
+    let code='';
+    try{ code=sessionStorage.getItem('switchTenant')||''; sessionStorage.removeItem('switchTenant'); }catch(e){}
+    if(code && form.elements.tenant) form.elements.tenant.value=code;
+    setTimeout(()=>form.elements.username?.focus(),50);
+  }
 }
 
 async function showWorkspace(){
