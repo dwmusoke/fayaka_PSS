@@ -764,20 +764,44 @@ async function renderList(name, el, pageArg){
   el.querySelectorAll('[data-action="record-mode"]').forEach(btn=>{
     btn.onclick = ()=>{ try{ localStorage.setItem('pss-record-mode-'+name, btn.getAttribute('data-mode')); }catch(e){} renderList(name, el, page); };
   });
-  el.querySelectorAll('[data-action="edit"]').forEach(btn=>{
-    btn.onclick = async ()=>{
-      const id = btn.getAttribute('data-id');
+  const openEdit = async (id)=>{
+    try{
+      const row = await fetchRowDetail(path, id, rows.find(x=>String(x[idKey])===String(id)) || {}, idKey, d);
+      const ucols = Object.keys(row).filter(c=>!FIELD_TYPES[c]?.startsWith('hidden') && c!==idKey && c!=='created_at' && c!=='updated_at');
+      const passwordField = name==='setup-users' ? `<div><label>New password</label>${inputFor('password','',(row.password||''))}</div>` : '';
+      const editTitle = `Edit ${meta[0]}`;
+      showModal(editTitle, `<form id="f-edit-${name}" class="form-grid">${ucols.map(c=>`<div><label>${fieldLabel(c)}</label>${inputFor(c, row[c], row[c]||'')}</div>`).join('')}${passwordField}<div class="form-actions"><button type="submit" class="primary">Save</button>${btn('Cancel','ghost','','data-action="modal-close"')}</div></form>`);
+      const form = document.querySelector(`#f-edit-${name}`);
+      if(form) form.onsubmit = async (ev)=>{ ev.preventDefault(); const udata=Object.fromEntries(new FormData(form).entries()); try{ await apiPut(path,id,udata); hideModal(); toast('Saved'); renderList(name, el); }catch(err){ toast(err.message,'error'); } };
+    }catch(err){ toast(err.message,'error'); }
+  };
+  const openRefund = async (id)=>{
+    const row = rows.find(x=>String(x[idKey])===String(id)) || {};
+    const amount = row.amount ?? row.refund_amount ?? row.value ?? row.total ?? '';
+    const cur = row.currency || defaultCurrency();
+    showModal('Refund approval', `<form id="f-refund-form" class="form-grid">
+      <div class="form-cols"><div><label>Record</label><input value="${esc(row.ref||row.pnr||row.ticket_no||row.payment_no||id)}" disabled></div><div><label>Amount (${esc(cur)})</label><input name="amount" type="number" min="0.01" step="0.01" value="${esc(amount)}" required></div></div>
+      <div class="form-cols"><div><label>Reason</label><select name="reason"><option value="client_request">Client request</option><option value="schedule_change">Schedule change</option><option value="duplicate_payment">Duplicate payment</option><option value="other">Other</option></select></div><div><label>Approval</label><select name="approval"><option value="pending">Pending approval</option><option value="approved">Approve now</option></select></div></div>
+      <div><label>Notes</label><textarea name="notes" rows="3" placeholder="Optional approval notes"></textarea></div>
+      <div class="form-actions"><button type="submit" class="primary">Submit refund request</button>${btn('Cancel','ghost','','data-action="modal-close"')}</div>
+      <div id="f-refund-msg" class="small"></div>
+    </form>`);
+    const form = document.getElementById('f-refund-form');
+    if(!form) return;
+    form.onsubmit = async (ev)=>{
+      ev.preventDefault();
+      const msg = document.getElementById('f-refund-msg');
+      const data = Object.fromEntries(new FormData(form).entries());
       try{
-        const row = await fetchRowDetail(path, id, rows.find(x=>String(x[idKey])===String(id)) || {}, idKey, d);
-        const ucols = Object.keys(row).filter(c=>!FIELD_TYPES[c]?.startsWith('hidden') && c!==idKey && c!=='created_at' && c!=='updated_at');
-        const passwordField = name==='setup-users' ? `<div><label>New password</label>${inputFor('password','',(row.password||''))}</div>` : '';
-        const editTitle = `Edit ${meta[0]}`;
-        showModal(editTitle, `<form id="f-edit-${name}" class="form-grid">${ucols.map(c=>`<div><label>${fieldLabel(c)}</label>${inputFor(c, row[c], row[c]||'')}</div>`).join('')}${passwordField}<div class="form-actions"><button type="submit" class="primary">Save</button>${btn('Cancel','ghost','','data-action="modal-close"')}</div></form>`);
-        const form = document.querySelector(`#f-edit-${name}`);
-        if(form) form.onsubmit = async (ev)=>{ ev.preventDefault(); const udata=Object.fromEntries(new FormData(form).entries()); try{ await apiPut(path,id,udata); hideModal(); toast('Saved'); renderList(name, el); }catch(err){ toast(err.message,'error'); } };
-      }catch(err){ toast(err.message,'error'); }
+        let r;
+        if(name==='unused-tickets') r = await api('/api/setup/unused-tickets/refund',{method:'POST',body:JSON.stringify({id, amount:data.amount, notes:data.notes, reason:data.reason, approval:data.approval})});
+        else r = await api(path+'/'+encodeURIComponent(id)+'/refund',{method:'POST',body:JSON.stringify(data)});
+        hideModal(); toast(r?.refund_no ? `Refund requested (${r.refund_no})` : 'Refund submitted'); renderList(name, el);
+      }catch(err){ if(msg){ msg.textContent=err.message; msg.className='small error'; } else toast(err.message,'error'); }
     };
-  });
+  };
+  el.querySelectorAll('[data-action="edit"]').forEach(b=>{ b.onclick = ()=> openEdit(b.getAttribute('data-id')); });
+  el.querySelectorAll('[data-action="refund"]').forEach(b=>{ b.onclick = ()=> openRefund(b.getAttribute('data-id')); });
   el.querySelectorAll('[data-action="delete"]').forEach(btn=>{
     btn.onclick = async ()=>{
       const id = btn.getAttribute('data-id');
@@ -859,14 +883,14 @@ async function renderList(name, el, pageArg){
         try{ const detail = await fetchRowDetail(path, id, row, idKey, d); showModal(meta[0]+' detail', `<div class="detail-grid">${Object.entries(detail).map(([k,v])=>`<div class="detail-row"><div class="detail-k">${fieldLabel(k)}</div><div class="detail-v">${cellFor(k,v)}</div></div>`).join('')}</div>`); }catch(err){ toast(err.message,'error'); }
         return;
       }
-      if(itemAction==='edit'){ el.querySelector(`[data-action="edit"][data-id="${CSS.escape(id)}"]`)?.click(); return; }
+      if(itemAction==='edit'){ openEdit(id); return; }
       if(itemAction==='delete'){ el.querySelector(`[data-action="delete"][data-id="${CSS.escape(id)}"]`)?.click(); return; }
       if(itemAction==='share'){ shareFromAction(name, row, d.share_base||''); return; }
       if(itemAction==='duplicate'){ el.querySelector(`[data-action="duplicate"][data-id="${CSS.escape(id)}"]`)?.click(); return; }
       if(itemAction==='ticket'){ el.querySelector(`[data-action="ticket"][data-id="${CSS.escape(id)}"]`)?.click(); return; }
       if(['pdf','receipt','statement','boardingpass','itinerary','voucher','booking-confirmation','credit-note','quotation','journeypass'].includes(itemAction) || btn.getAttribute('data-pdf')){ const pdf = btn.getAttribute('data-pdf')||itemAction; openPdfViewer(`/api/documents/pdf/${pdf}/${encodeURIComponent(id)}`, row.ref||row.title||pdf.replace(/-/g,' ').replace(/\b\w/g,c=>c.toUpperCase())); return; }
       if(itemAction==='post'){ try{ await api(path+'/'+encodeURIComponent(id)+'/post',{method:'POST',body:'{}'}); toast('Posted'); renderList(name,el); }catch(err){ toast(err.message,'error'); } return; }
-      if(itemAction==='refund'){ try{ await api(path+'/'+encodeURIComponent(id)+'/refund',{method:'POST',body:'{}'}); toast('Refunded'); renderList(name,el); }catch(err){ toast(err.message,'error'); } return; }
+      if(itemAction==='refund'){ openRefund(id); return; }
       toast(`${itemAction} not implemented for this view`, 'error');
     };
   });
