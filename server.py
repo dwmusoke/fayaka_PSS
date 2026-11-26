@@ -1049,6 +1049,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.api_pss_charter_status(tenant_id, user_id, path.split('/')[4], 'completed')
             if path.startswith('/api/pss/charters/') and path.endswith('/passenger') and method == 'POST':
                 return self.api_pss_charter_passenger(tenant_id, user_id, path.split('/')[4])
+            if path.startswith('/api/pss/charters/') and path.endswith('/passengers') and method == 'GET':
+                return self.api_pss_charter_passengers(tenant_id, path.split('/')[4])
             if path.startswith('/api/pss/charters/') and method == 'GET':
                 return self.api_pss_charter_detail(tenant_id, path.rsplit('/', 1)[-1])
             if path.startswith('/api/pss/charters/') and method in ('PUT', 'DELETE'):
@@ -6601,7 +6603,7 @@ class Handler(BaseHTTPRequestHandler):
                          (tenant['id'], request_no, data.get('client_name'), data.get('email'), data.get('phone'),
                           data.get('origin'), data.get('destination'), data.get('flight_date'),
                           data.get('pax_count'), data.get('aircraft_type'), data.get('requirements'),
-                          data.get('currency') or self._tenant_currency(conn, tenant_id) or 'USD', now_iso(), now_iso()))
+                           data.get('currency') or self._tenant_currency(conn, tenant['id']) or 'USD', now_iso(), now_iso()))
             rid = q(conn, "SELECT last_insert_rowid() v", (), one=True)['v']
             self._trace(conn, tenant['id'], 'portal', 'pss_charter_request', rid, 'charter_requested',
                         data.get('client_name'), f"{request_no} · {data.get('origin')}-{data.get('destination')}", trace_id, self)
@@ -7016,6 +7018,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({'requests': rows})
             rid = self._oid(rid)
             if method == 'DELETE':
+                fids = [r['id'] for r in q(conn, "SELECT id FROM pss_charter_flights WHERE request_id=? AND tenant_id=?", (rid, tenant_id))]
+                for fid in fids:
+                    conn.execute("DELETE FROM pss_charter_passengers WHERE charter_id=? AND tenant_id=?", (fid, tenant_id))
+                conn.execute("DELETE FROM pss_charter_flights WHERE request_id=? AND tenant_id=?", (rid, tenant_id))
                 conn.execute("DELETE FROM pss_charter_requests WHERE id=? AND tenant_id=?", (rid, tenant_id))
                 return self._json({'ok': True})
             data = read_json(self)
@@ -7053,11 +7059,16 @@ class Handler(BaseHTTPRequestHandler):
         rid = self._oid(rid)
         data = read_json(self)
         amount = float(data.get('quoted_amount') or 0)
+        if amount <= 0:
+            return self._json({'error': 'quoted_amount must be greater than zero'}, 400)
         with db() as conn:
+            req = q(conn, "SELECT * FROM pss_charter_requests WHERE id=? AND tenant_id=?", (rid, tenant_id), one=True)
+            if not req:
+                return self._json({'error': 'Charter request not found'}, 404)
             conn.execute("UPDATE pss_charter_requests SET quoted_amount=?,status='quoted',updated_at=? WHERE id=? AND tenant_id=?",
                          (amount, now_iso(), rid, tenant_id))
             self._trace(conn, tenant_id, 'charter', 'pss_charter_request', rid, 'quote_issued', user_id, str(amount), None, self)
-        return self._json({'ok': True})
+        return self._json({'ok': True, 'quoted_amount': amount})
 
     def api_pss_charter_confirm(self, tenant_id, user_id, rid):
         rid = self._oid(rid)
@@ -7077,17 +7088,53 @@ class Handler(BaseHTTPRequestHandler):
                           total, req.get('currency') or 'USD', user_id, now_iso(), now_iso()))
             cid = q(conn, "SELECT last_insert_rowid() v", (), one=True)['v']
             conn.execute("UPDATE pss_charter_requests SET status='confirmed', updated_at=? WHERE id=? AND tenant_id=?", (now_iso(), rid, tenant_id))
-            self._trace(conn, tenant_id, 'charter', 'pss_charter_flight', cid, 'charter_confirmed', user_id, charter_no, None, self)
-        return self._json({'ok': True, 'charter_id': cid, 'charter_no': charter_no})
+            pnr = (data.get('pnr') or charter_no).upper().replace('-', '')[:6]
+            cur = req.get('currency') or 'USD'
+            ts = now_iso()
+            segment = {'flight_no': data.get('flight_no') or charter_no,
+                       'origin': data.get('origin') or req.get('origin'),
+                       'destination': data.get('destination') or req.get('destination'),
+                       'flight_date': data.get('flight_date') or req.get('flight_date'),
+                       'dep_time': data.get('dep_time'), 'arr_time': data.get('arr_time'),
+                       'aircraft': data.get('aircraft') or req.get('aircraft_type')}
+            conn.execute("""INSERT INTO pss_bookings(tenant_id,pnr,passenger_name,contact_email,contact_phone,airport_code,
+                            fare_amount,total_amount,currency,ticket_status,payment_status,booking_status,booking_source,
+                            charter_id,charter_no,segments_json,created_by,created_at,updated_at)
+                            VALUES (?,?,?,?,?,?,?,?,?,'unissued','pending','confirmed','charter',?,?,?,?,?,?)""",
+                         (tenant_id, pnr, req.get('client_name'), req.get('contact_email'), req.get('contact_phone'),
+                          segment.get('origin'), total, total, cur, rid, charter_no,
+                          json.dumps([segment], default=str), user_id, ts, ts))
+            bid = q(conn, "SELECT last_insert_rowid() v", (), one=True)['v']
+            trace_id = self._new_trace_id()
+            conn.execute("UPDATE pss_bookings SET trace_id=? WHERE id=? AND tenant_id=?", (trace_id, bid, tenant_id))
+            try:
+                ticket = self._pss_next_ticket(conn, tenant_id, None, data.get('origin') or req.get('origin'))
+                if ticket:
+                    conn.execute("UPDATE pss_bookings SET ticket_number=?,ticket_status='issued',issue_date=?,issued_by=?,updated_at=? WHERE id=? AND tenant_id=?",
+                                 (ticket, _today(), user_id, ts, bid, tenant_id))
+            except Exception:
+                pass
+            try:
+                self._erp_sync_pss_booking(conn, tenant_id, bid, actor=user_id or 'charter', source='charter')
+            except Exception:
+                pass
+            self._doc_audit(conn, tenant_id, 'booking-confirmation', pnr, bid, pnr, 'charter_confirmed', user_id or 'charter', trace_id, {'charter_no': charter_no})
+            self._trace(conn, tenant_id, 'charter', 'pss_charter_flight', cid, 'charter_confirmed', user_id, charter_no, trace_id, self)
+        return self._json({'ok': True, 'charter_id': cid, 'charter_no': charter_no, 'booking_id': bid, 'pnr': pnr})
 
     def api_pss_charter_status(self, tenant_id, user_id, rid, status):
         rid = self._oid(rid)
         with db() as conn:
-            conn.execute("UPDATE pss_charter_flights SET status=?, updated_at=? WHERE id=? AND tenant_id=?", (status, now_iso(), rid, tenant_id))
+            req = q(conn, "SELECT * FROM pss_charter_requests WHERE id=? AND tenant_id=?", (rid, tenant_id), one=True)
+            if not req:
+                return self._json({'error': 'Charter request not found'}, 404)
+            conn.execute("UPDATE pss_charter_flights SET status=?, updated_at=? WHERE request_id=? AND tenant_id=?",
+                         (status, now_iso(), rid, tenant_id))
             conn.execute("UPDATE pss_charter_requests SET status=?, updated_at=? WHERE id=? AND tenant_id=?",
-                         ('completed' if status == 'completed' else status, now_iso(),
-                          (q(conn, "SELECT request_id FROM pss_charter_flights WHERE id=? AND tenant_id=?", (rid, tenant_id), one=True) or {}).get('request_id'), tenant_id))
-            self._trace(conn, tenant_id, 'charter', 'pss_charter_flight', rid, 'status_' + status, user_id, status, None, self)
+                         (status, now_iso(), rid, tenant_id))
+            conn.execute("UPDATE pss_bookings SET booking_status=? WHERE charter_id=? AND tenant_id=?",
+                         ('completed' if status == 'completed' else status, rid, tenant_id))
+            self._trace(conn, tenant_id, 'charter', 'pss_charter_request', rid, 'status_' + status, user_id, status, None, self)
         return self._json({'ok': True})
 
     def api_pss_charter_passenger(self, tenant_id, user_id, cid):
@@ -7108,6 +7155,17 @@ class Handler(BaseHTTPRequestHandler):
             pid = q(conn, "SELECT last_insert_rowid() v", (), one=True)['v']
             self._trace(conn, tenant_id, 'charter', 'pss_charter_passenger', pid, 'passenger_added', user_id, data.get('name'), None, self)
         return self._json({'ok': True, 'passenger_id': pid})
+
+    def api_pss_charter_passengers(self, tenant_id, rid):
+        rid = self._oid(rid)
+        with db() as conn:
+            ids = [r['id'] for r in q(conn, "SELECT id FROM pss_charter_flights WHERE request_id=? AND tenant_id=?", (rid, tenant_id))]
+            if not ids:
+                return self._json({'passengers': []})
+            marks = ','.join('?' for _ in ids)
+            rows = q(conn, f"SELECT * FROM pss_charter_passengers WHERE charter_id IN ({marks}) AND tenant_id=? ORDER BY id DESC",
+                     ids + [tenant_id])
+        return self._json({'passengers': rows})
 
     def api_pss_charter_flights(self, tenant_id):
         with db() as conn:

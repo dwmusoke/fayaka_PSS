@@ -1399,6 +1399,8 @@ CREATE TABLE IF NOT EXISTS pss_bookings (
   booking_status TEXT DEFAULT 'confirmed',
   hold_expires_at TEXT,
   seat_no TEXT,
+  charter_id INTEGER,
+  charter_no TEXT,
   created_by INTEGER,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -2180,6 +2182,7 @@ def ensure_erp_pss_link(conn):
         ('expiry_date', 'TEXT'),
         ('reminder_sent_at', 'TEXT'),
     ])
+    _add_columns(conn, 'pss_bookings', [('charter_id', 'INTEGER'), ('charter_no', 'TEXT')])
     try:
         conn.executescript("""
         CREATE INDEX IF NOT EXISTS idx_customers_agency ON customers(tenant_id, agency_id);

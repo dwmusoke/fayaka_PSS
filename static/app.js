@@ -258,6 +258,8 @@ const VIEW_ACTIONS = {
   reconciliations:[{label:'Review',action:'view'},{label:'Match',action:'match'},{label:'Post',action:'post'},{label:'Share',action:'share'}],
   orders:[{label:'View',action:'view'},{label:'Edit',action:'edit'},{label:'Duplicate',action:'duplicate'},{label:'Invoice',action:'pdf',pdf:'order'},{label:'Share',action:'share'}],
   'pss-bookings':[{label:'View',action:'view'},{label:'Edit',action:'edit'},{label:'Ticket',action:'ticket'},{label:'Itinerary',action:'pdf',pdf:'itinerary'},{label:'Booking confirmation',action:'pdf',pdf:'booking-confirmation'},{label:'Travel documents',action:'travel-docs'},{label:'Documents',action:'docs'},{label:'Share',action:'share'},{label:'Cancel',action:'cancel',danger:true}],
+  'pss-charters':[{label:'View',action:'view'},{label:'Quote',action:'charter-quote'},{label:'Confirm',action:'charter-confirm'},{label:'Passengers',action:'charter-passengers'},{label:'Complete',action:'charter-complete'},{label:'Edit',action:'edit'},{label:'Delete',action:'delete',danger:true}],
+  'pss-charter-flights':[{label:'View',action:'view'},{label:'Edit',action:'edit'},{label:'Delete',action:'delete',danger:true}],
   'pss-payments':[{label:'View',action:'view'},{label:'Receipt',action:'receipt',pdf:'receipt'},{label:'Edit',action:'edit'},{label:'Share',action:'share'},{label:'Refund',action:'refund',danger:true}],
   crm:[{label:'View',action:'view'},{label:'Edit',action:'edit'},{label:'Statement',action:'statement',pdf:'customer'},{label:'Travel documents',action:'travel-docs'},{label:'Share',action:'share'}],
   travelers:[{label:'View',action:'view'},{label:'Edit',action:'edit'},{label:'Statement',action:'statement',pdf:'traveler'},{label:'Travel documents',action:'travel-docs'},{label:'Share',action:'share'}]
@@ -566,6 +568,11 @@ const CREATE_SCHEMAS = {
     sel('ticket_status',['unissued','issued','void','refunded','exchanged'],false,'unissued'),
     txt('ssr_codes'),area('special_requests'),
     area('segments_json','Segments JSON (optional: [{"origin":"EBB","destination":"NBO","flight_no":"FA402","date":"2026-12-01","dep_time":"08:00","arr_time":"10:00"}])')
+  ]},
+  'pss-charters':{fields:[
+    txt('client_name',true),txt('contact_email'),txt('phone'),txt('origin',true),txt('destination',true),
+    dat('flight_date',true,()=>today()),num('pax_count',false,1),txt('aircraft_type'),
+    sel('currency',CURRENCIES,false,'USD'),area('requirements'),area('notes')
   ]},
   'pss-charter-flights':{fields:[
     txt('charter_no',true),num('request_id'),txt('flight_no',true),txt('origin',true),txt('destination',true),
@@ -950,10 +957,14 @@ async function renderList(name, el, pageArg){
       if(itemAction==='post'){ try{ await api(path+'/'+encodeURIComponent(id)+'/post',{method:'POST',body:'{}'}); toast('Posted'); renderList(name,el); }catch(err){ toast(err.message,'error'); } return; }
       if(itemAction==='refund'){ openRefund(id); return; }
       if(itemAction==='travel-docs'){ openBookingDocuments(name, row); return; }
+      if(['charter-quote','charter-confirm','charter-passengers','charter-complete'].includes(itemAction)){ openCharterOps(itemAction, row); return; }
       toast(`${itemAction} not implemented for this view`, 'error');
     };
   });
   el.querySelectorAll('[data-action="travel-docs"]').forEach(b=>{ b.onclick=()=>openBookingDocuments(name, rows.find(x=>String(x[idKey])===String(b.getAttribute('data-id')))||{id:b.getAttribute('data-id')}); });
+  ['charter-quote','charter-confirm','charter-passengers','charter-complete'].forEach(a=>{
+    el.querySelectorAll(`[data-action="${a}"]`).forEach(b=>{ b.onclick=()=>openCharterOps(a, rows.find(x=>String(x[idKey])===String(b.getAttribute('data-id')))||{id:b.getAttribute('data-id')}); });
+  });
   ['pdf','receipt','statement','boardingpass','itinerary','voucher','booking-confirmation','credit-note','quotation','journeypass'].forEach(a=>{
     el.querySelectorAll(`[data-action="${a}"]`).forEach(btn=>{
       btn.onclick = ()=>{
@@ -966,10 +977,11 @@ async function renderList(name, el, pageArg){
   });
   el.querySelectorAll('[data-action="new-record"]').forEach(btn=>{
     btn.onclick = ()=>{
-      const flds = fieldsFor(name);
-      showModal(`New ${meta[0]}`, `<form id="f-create-${name}" class="form-grid">${flds.map(c=>`<div><label>${fieldLabel(c)}</label>${inputFor(c,'','')}</div>`).join('')}<div class="form-actions"><button type="submit" class="primary">Create</button>${btn('Cancel','ghost','','data-action="modal-close"')}</div></form>`);
+      const schema = (cfgFor(name).fields||[]);
+      if(!schema.length){ toast('No create form is configured for this view','error'); return; }
+      showModal(`New ${meta[0]}`, `<form id="f-create-${name}" class="form-grid">${schemaFields(schema)}<div class="form-actions"><button type="submit" class="primary">Create</button>${btn('Cancel','ghost','','data-action="modal-close"')}</div></form>`);
       const form = document.querySelector(`#f-create-${name}`);
-      if(form) form.onsubmit = async (ev)=>{ ev.preventDefault(); try{ await api(createPath,{method:'POST',body:JSON.stringify(readFormData(form))}); hideModal(); toast('Created'); renderList(name,el); }catch(err){ toast(err.message,'error'); } };
+      if(form) form.onsubmit = async (ev)=>{ ev.preventDefault(); try{ await api(createPath,{method:'POST',body:JSON.stringify(schemaPayload(form,schema))}); hideModal(); toast('Created'); renderList(name,el); }catch(err){ toast(err.message,'error'); } };
     };
   });
   el.querySelectorAll('[data-action="refresh-view"]').forEach(btn=>{ btn.onclick = ()=> renderList(name,el); });
@@ -1228,6 +1240,53 @@ async function openBookingDocuments(view,row){
   };
   $('#td-remind',body).onclick=async()=>{ try{ const r=await api('/api/pss/travel-documents/reminders',{method:'POST',body:JSON.stringify({days:30})}); toast(r.created?`${r.created} expiry reminder(s) sent`:'No documents nearing expiry'); }catch(e){ toast(e.message,'error'); } };
 }
+async function openCharterOps(action, row){
+  const id = row.id;
+  const refresh = ()=>renderView('pss-charters');
+  if(action==='charter-quote'){
+    showModal('Issue charter quote', `<form id="f-charter-quote" class="form-grid">
+      <div class="form-cols"><div><label>Request</label><input value="${esc(row.request_no||row.client_name||id)}" disabled></div><div><label>Quoted amount (${esc(row.currency||'USD')}) *</label><input name="quoted_amount" type="number" min="0.01" step="0.01" value="${esc(row.quoted_amount||'')}" required></div></div>
+      <div class="form-actions"><button type="submit" class="primary">Issue quote</button>${btn('Cancel','ghost','','data-action="modal-close"')}</div><div id="f-charter-quote-msg" class="small"></div></form>`);
+    const f=document.getElementById('f-charter-quote');
+    if(f) f.onsubmit=async ev=>{ ev.preventDefault(); try{ await api(`/api/pss/charters/${id}/quote`,{method:'POST',body:JSON.stringify(readFormData(f))}); hideModal(); toast('Quote issued'); refresh(); }catch(e){ const m=document.getElementById('f-charter-quote-msg'); if(m){m.textContent=e.message;m.className='small error';} } };
+    return;
+  }
+  if(action==='charter-confirm'){
+    showModal('Confirm charter', `<form id="f-charter-confirm" class="form-grid">
+      <div class="form-cols"><div><label>Flight no</label><input name="flight_no" value="${esc(row.request_no||'')}"></div><div><label>Date *</label><input name="flight_date" type="date" value="${esc(row.flight_date||today())}" required></div></div>
+      <div class="form-cols"><div><label>Origin *</label><input name="origin" value="${esc(row.origin||'')}" required></div><div><label>Destination *</label><input name="destination" value="${esc(row.destination||'')}" required></div></div>
+      <div class="form-cols"><div><label>Departure</label><input name="dep_time" placeholder="08:00"></div><div><label>Arrival</label><input name="arr_time" placeholder="10:00"></div></div>
+      <div class="form-cols"><div><label>Aircraft</label><input name="aircraft" value="${esc(row.aircraft_type||'')}"></div><div><label>Seats</label><input name="seats" type="number" min="1" value="${esc(row.pax_count||1)}"></div></div>
+      <div class="form-cols"><div><label>Total amount</label><input name="total_amount" type="number" min="0" step="0.01" value="${esc(row.quoted_amount||0)}"></div><div><label>Contract no</label><input name="contract_no"></div></div>
+      <div class="muted tiny">Confirmation creates a charter flight, a PNR/booking and issues a ticket from available stock.</div>
+      <div class="form-actions"><button type="submit" class="primary">Confirm charter</button>${btn('Cancel','ghost','','data-action="modal-close"')}</div><div id="f-charter-confirm-msg" class="small"></div></form>`);
+    const f=document.getElementById('f-charter-confirm');
+    if(f) f.onsubmit=async ev=>{ ev.preventDefault(); try{ const r=await api(`/api/pss/charters/${id}/confirm`,{method:'POST',body:JSON.stringify(readFormData(f))}); hideModal(); toast(`Confirmed · PNR ${r.pnr||'-'} · ${r.charter_no||''}`); refresh(); }catch(e){ const m=document.getElementById('f-charter-confirm-msg'); if(m){m.textContent=e.message;m.className='small error';} } };
+    return;
+  }
+  if(action==='charter-passengers'){
+    let detail={},plist=[];
+    try{ [detail,plist] = await Promise.all([api(`/api/pss/charters/${id}`),api(`/api/pss/charters/${id}/passengers`)]); }catch(e){ toast(e.message,'error'); }
+    const flights=detail.flights||[];
+    const rows=(plist.passengers||[]).map(p=>`<tr><td>${esc(p.name)}</td><td>${esc(p.doc_no||'-')}</td><td>${esc(p.seat_no||'-')}</td><td>${esc(p.ticket_number||'-')}</td><td>${statusBadge(p.checkin_status||'pending')}</td></tr>`).join('')||'<tr><td colspan="5" class="empty">No passengers yet</td></tr>';
+    const flightOpts=flights.map(fl=>`<option value="${esc(fl.id)}">${esc(fl.charter_no||fl.flight_no)} · ${esc(fl.origin)}→${esc(fl.destination)}</option>`).join('');
+    showModal('Charter passengers', `<div class="panel"><div class="panel-body">
+      <div class="table-wrap"><table><thead><tr><th>Name</th><th>Doc no</th><th>Seat</th><th>Ticket</th><th>Check-in</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <h4 class="doc-section-title" style="margin-top:14px">Add passenger</h4>
+      <form id="f-charter-pax" class="form-grid"><div class="form-cols"><div><label>Flight</label><select name="charter_id">${flightOpts||'<option value="">Confirm the charter first</option>'}</select></div><div><label>Name *</label><input name="name" required></div></div>
+      <div class="form-cols"><div><label>Doc no</label><input name="doc_no"></div><div><label>Seat</label><input name="seat_no"></div></div>
+      <div class="form-cols"><div><label>Meal</label><input name="meal_pref"></div><div><label>Ticket no</label><input name="ticket_number"></div></div>
+      <div class="form-actions"><button type="submit" class="primary">Add passenger</button>${btn('Cancel','ghost','','data-action="modal-close"')}</div><div id="f-charter-pax-msg" class="small"></div></form>
+    </div></div>`);
+    const f=document.getElementById('f-charter-pax');
+    if(f) f.onsubmit=async ev=>{ ev.preventDefault(); const data=readFormData(f); const fid=data.charter_id||id; try{ await api(`/api/pss/charters/${fid}/passenger`,{method:'POST',body:JSON.stringify(data)}); hideModal(); toast('Passenger added'); openCharterOps('charter-passengers',row); }catch(e){ const m=document.getElementById('f-charter-pax-msg'); if(m){m.textContent=e.message;m.className='small error';} } };
+    return;
+  }
+  if(action==='charter-complete'){
+    if(!confirm('Mark this charter and its booking complete?')) return;
+    try{ await api(`/api/pss/charters/${id}/complete`,{method:'POST',body:'{}'}); toast('Charter completed'); refresh(); }catch(e){ toast(e.message,'error'); }
+  }
+}
 async function shareFromAction(view, row, shareBase){
   const ref = row.pnr||row.booking_ref||row.sale_no||row.ref||row.id||'';
   const title = `${(view||'record').replace(/-/g,' ')} ${ref}`.trim();
@@ -1425,7 +1484,7 @@ const ROLE_VIEWS = {
   airline_admin: '*',
   airline_accountant: ['dashboard','finance','invoicing','credit-notes','payments','revenue','refunds','coupons','vouchers','bank-accounts','bank-transactions','reconciliations','bills','expenses','journals','unused-tickets','fare-optimization','analytics','documents','shares','loyalty','tasks','notifications'],
   airline_reservations: ['dashboard','pss-overview','pss-flights','flight-inventory','pss-bookings','pss-checkins','pss-stock','agency-wallet','pss-eticket-tracker','pss-ticket-status','pss-agencies','pss-direct','pss-charters','pss-charter-flights','unused-tickets','fare-optimization','dispatch','crm','travelers','documents','shares','tasks','notifications','analytics','revenue'],
-  airline_operations: ['dashboard','pss-overview','pss-flights','flight-inventory','pss-bookings','seat-hold','pss-checkins','pss-weather','pss-airport-docs','disruptions','dispatch','pss-ticket-status','pss-trace','documents','shares','tasks','notifications','intelligence','analytics','revenue'],
+  airline_operations: ['dashboard','pss-overview','pss-flights','flight-inventory','pss-bookings','pss-charters','pss-charter-flights','seat-hold','pss-checkins','pss-weather','pss-airport-docs','disruptions','dispatch','pss-ticket-status','pss-trace','documents','shares','tasks','notifications','intelligence','analytics','revenue'],
   agency_admin: ['pss-workspace','pss-bookings','agency-wallet','crm','finance','invoicing','credit-notes','payments','estimates','documents','shares','tasks','notifications'],
   agency_agent: ['pss-workspace','pss-bookings','agency-wallet','crm','finance','invoicing','credit-notes','payments','estimates','documents','shares','tasks','notifications'],
   viewer: ['dashboard','analytics']
