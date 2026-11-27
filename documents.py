@@ -128,16 +128,15 @@ def _barcode128(c, value, x, y, width=300, height=34):
     text = str(value if value not in (None, '') else '')
     try:
         widget = code128.Code128(text or ' ', barHeight=height, barWidth=0.32, humanReadable=False)
-        bounds = widget.getBounds()
-        bw, bh = bounds[2] - bounds[0], bounds[3] - bounds[1]
-        scale_x, scale_y = width / bw, height / bh
-        drawing = Drawing(width, height, transform=[scale_x, 0, 0, scale_y,
-                                                     -bounds[0] * scale_x, -bounds[1] * scale_y])
-        drawing.add(widget)
-        renderPDF.draw(drawing, c, x, y)
+        bw, bh = float(widget.width or 0), float(widget.height or 0)
+        if bw <= 0 or bh <= 0:
+            raise ValueError('zero size')
+        # Code128 is a Flowable, not a Shape; draw it directly with its own drawOn
+        widget.drawOn(c, x, y)
         return
-    except Exception:
-        pass
+    except Exception as e:
+        import sys
+        print('barcode128 failed:', repr(e), file=sys.stderr)
     try:
         c.setFillColor(colors.black)
     except Exception:
@@ -610,6 +609,8 @@ def _boarding_card(c, y, branding, ci, bk, payload, bags=None, bcbp=None):
     qr_size = 74
     qr_x = x + w - qr_size - 14
     _qr(c, code, qr_x, bottom + 8, qr_size)
+    # Linear barcode (Code 128) under the QR for scanners that read 1D barcodes
+    _barcode128(c, code, x + 18, bottom + 96, w - qr_size - 46, 22)
     code_w = w - qr_size - 46
     c.setFillColor(muted)
     c.setFont('Helvetica-Bold', 7.5)
