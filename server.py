@@ -4638,14 +4638,17 @@ class Handler(BaseHTTPRequestHandler):
             committed_by[sc] = int((q(conn, sql, params, one=True) or {}).get('n') or 0)
         committed_all = sum(committed_by.values()) if subclass=='ALL' else committed_by.get(subclass,0)
 
+        today = now_iso()[:10]
         rules = q(conn, """SELECT * FROM pss_inventory_rules
                            WHERE tenant_id=? AND status='active'
+                           AND (effective_from IS NULL OR effective_from='' OR effective_from<=?)
+                           AND (effective_to IS NULL OR effective_to='' OR effective_to>=?)
                            AND (pos='ALL' OR pos=?) AND (subclass='ALL' OR subclass=? OR nest_type IN ('serial','parallel','mixed'))
                            AND (flight_id IS NULL OR flight_id=?)
                            AND (flight_date IS NULL OR flight_date='' OR flight_date=?)
                            AND (segment_id IS NULL OR segment_id=?)
                            ORDER BY priority ASC, id ASC""",
-                  (tenant_id, pos, subclass, flight['id'], flight.get('flight_date'), seg_id or None))
+                   (tenant_id, today, today, pos, subclass, flight['id'], flight.get('flight_date'), seg_id or None))
 
         def _rule_applies(r, sc):
             rsc = str(r.get('subclass') or 'ALL').upper()
@@ -5314,6 +5317,23 @@ class Handler(BaseHTTPRequestHandler):
             flight = q(conn, "SELECT * FROM pss_flights WHERE id=? AND tenant_id=?", (fid, tenant_id), one=True)
             if not flight:
                 return self._json({'error': 'Flight not found'}, 400)
+            # Hard gate: consult published inventory availability for this flight/POS/subclass.
+            # Falls back to pss_flights.available_seats when no inventory row exists (backward compatible).
+            pos = 'ALL'
+            cid = data.get('channel_id')
+            if cid:
+                ch = q(conn, "SELECT code FROM pss_channels WHERE id=? AND tenant_id=?", (self._oid(cid), tenant_id), one=True)
+                if ch and ch.get('code'):
+                    pos = ch['code']
+            subclass = str(data.get('fare_class') or flight.get('fare_class') or 'Y').upper()
+            if subclass not in ('Y','J','F'):
+                subclass = 'ALL'
+            inv = q(conn, """SELECT available FROM pss_inventory_availability
+                             WHERE tenant_id=? AND flight_id=? AND pos=? AND pos_subclass=?
+                             ORDER BY published_at DESC LIMIT 1""",
+                    (tenant_id, fid, pos, subclass), one=True)
+            if inv is not None and int(inv.get('available') or 0) <= 0:
+                return self._json({'error': 'No seats available for this flight/POS/subclass'}, 400)
             reserved = conn.execute("UPDATE pss_flights SET available_seats=available_seats-1, updated_at=? WHERE id=? AND tenant_id=? AND available_seats>0",
                                     (now_iso(), fid, tenant_id))
             if reserved.rowcount < 1:

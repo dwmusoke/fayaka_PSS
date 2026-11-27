@@ -1298,6 +1298,8 @@ CREATE TABLE IF NOT EXISTS pss_inventory_queue (
   issue_type TEXT NOT NULL,
   severity TEXT DEFAULT 'warning',
   flight_id INTEGER,
+  assignee TEXT,
+  notes TEXT,
   message TEXT,
   status TEXT DEFAULT 'open',
   created_at TEXT NOT NULL,
