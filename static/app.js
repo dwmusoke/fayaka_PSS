@@ -259,7 +259,7 @@ const VIEW_ACTIONS = {
   reconciliations:[{label:'Review',action:'view'},{label:'Match',action:'match'},{label:'Post',action:'post'},{label:'Share',action:'share'}],
   orders:[{label:'View',action:'view'},{label:'Edit',action:'edit'},{label:'Duplicate',action:'duplicate'},{label:'Invoice',action:'pdf',pdf:'order'},{label:'Share',action:'share'}],
   'pss-bookings':[{label:'View',action:'view'},{label:'Edit',action:'edit'},{label:'Ticket',action:'ticket'},{label:'Itinerary',action:'pdf',pdf:'itinerary'},{label:'Booking confirmation',action:'pdf',pdf:'booking-confirmation'},{label:'Travel documents',action:'travel-docs'},{label:'Documents',action:'docs'},{label:'Share',action:'share'},{label:'Cancel',action:'cancel',danger:true}],
-  'pss-charters':[{label:'View',action:'view'},{label:'Quote',action:'charter-quote'},{label:'Confirm',action:'charter-confirm'},{label:'Passengers',action:'charter-passengers'},{label:'Complete',action:'charter-complete'},{label:'Edit',action:'edit'},{label:'Delete',action:'delete',danger:true}],
+  'pss-charters':[{label:'View',action:'view'},{label:'Quote',action:'charter-quote'},{label:'Quotation',action:'charter-quotation'},{label:'Confirm',action:'charter-confirm'},{label:'Passengers',action:'charter-passengers'},{label:'Complete',action:'charter-complete'},{label:'Edit',action:'edit'},{label:'Delete',action:'delete',danger:true}],
   'pss-charter-flights':[{label:'View',action:'view'},{label:'Edit',action:'edit'},{label:'Delete',action:'delete',danger:true}],
   'pss-agencies':[{label:'View',action:'view'},{label:'Edit',action:'edit'},{label:'Wallet & stock',action:'goto-agency-wallet'},{label:'Allocate stock',action:'goto-stock'},{label:'Partner login',action:'goto-partner-users'},{label:'Delete',action:'delete',danger:true}],
   'pss-payments':[{label:'View',action:'view'},{label:'Receipt',action:'receipt',pdf:'receipt'},{label:'Edit',action:'edit'},{label:'Share',action:'share'},{label:'Refund',action:'refund',danger:true}],
@@ -965,6 +965,7 @@ async function renderList(name, el, pageArg){
       if(itemAction==='refund'){ openRefund(id); return; }
       if(itemAction==='travel-docs'){ openBookingDocuments(name, row); return; }
       if(['charter-quote','charter-confirm','charter-passengers','charter-complete'].includes(itemAction)){ openCharterOps(itemAction, row); return; }
+      if(itemAction==='charter-quotation'){ renderDocument('charter-quotation', id); return; }
       if(itemAction==='goto-agency-wallet'){ setView('agency-wallet'); return; }
       if(itemAction==='goto-stock'){ setView('pss-stock'); return; }
       if(itemAction==='goto-partner-users'){ setView('pss-partner-users'); return; }
@@ -975,6 +976,7 @@ async function renderList(name, el, pageArg){
   ['charter-quote','charter-confirm','charter-passengers','charter-complete'].forEach(a=>{
     el.querySelectorAll(`[data-action="${a}"]`).forEach(b=>{ b.onclick=()=>openCharterOps(a, rows.find(x=>String(x[idKey])===String(b.getAttribute('data-id')))||{id:b.getAttribute('data-id')}); });
   });
+  el.querySelectorAll('[data-action="charter-quotation"]').forEach(b=>{ b.onclick=()=>renderDocument('charter-quotation', b.getAttribute('data-id')); });
   const gotoMap={'goto-agency-wallet':'agency-wallet','goto-stock':'pss-stock','goto-partner-users':'pss-partner-users'};
   Object.entries(gotoMap).forEach(([a,target])=>{
     el.querySelectorAll(`[data-action="${a}"]`).forEach(b=>{ b.onclick=()=>setView(target); });
@@ -1020,8 +1022,21 @@ async function renderList(name, el, pageArg){
   }
 }
 
+const DOC_KINDS = {
+  invoice: ['Invoice','Invoice'],
+  payment: ['Payment Receipt','Receipt'],
+  'credit-note': ['Credit Note','Credit Note'],
+  estimate: ['Quotation','Estimate/Quotation'],
+  statement: ['Account Statement','Statement'],
+  boardingpass: ['Boarding Pass','Boarding Pass'],
+  itinerary: ['Itinerary','Travel Itinerary'],
+  'journey-document': ['Journey Document','Journey Document'],
+  eticket: ['E-Ticket','Electronic Ticket'],
+  'booking-confirmation': ['Booking Confirmation','Booking Confirmation'],
+  'charter-quotation': ['Charter Quotation','Charter Quotation'],
+};
 function pdfKindForEntity(entityType){
-  return ({invoice:'invoice',payment:'receipt',pss_payment:'receipt',credit_note:'credit-note',estimate:'quotation',customer:'statement',traveler:'statement',pss_booking:'itinerary',booking:'booking-confirmation',pss_checkin:'boardingpass'})[entityType] || 'invoice';
+  return ({invoice:'invoice',payment:'receipt',pss_payment:'receipt',credit_note:'credit-note',estimate:'quotation',customer:'statement',traveler:'statement',pss_booking:'itinerary',booking:'booking-confirmation',pss_checkin:'boardingpass',charter:'charter-quotation'})[entityType] || 'invoice';
 }
 function pdfTarget(view, row, id, kind){
   if(view==='documents') return {kind:pdfKindForEntity(row.entity_type), id:row.entity_id || id};
@@ -1095,10 +1110,14 @@ async function fetchDocData(kind,id){
     const [inv,pay] = await Promise.all([api('/api/invoices'),api('/api/payments')]);
     return {invoices:inv.invoices||[], payments:pay.payments||[], tenant_id:tid};
   }
+  if(kind==='charter-quotation'){
+    const d = await api(`/api/pss/charters/${id}`);
+    return {charter:d.request||{}, flight:(d.flights||[])[0]||{}, booking:d.booking||{}, tenant_id:tid};
+  }
   return {};
 }
 function docEntityType(kind){
-  if(['booking-confirmation','itinerary','journey-document','eticket'].includes(kind)) return 'pss_booking';
+  if(['booking-confirmation','itinerary','journey-document','eticket','charter-quotation'].includes(kind)) return 'pss_booking';
   if(kind==='boardingpass'||kind==='baggagetag') return 'pss_checkin';
   if(kind==='upliftcoupon') return 'upliftcoupon';
   if(kind==='invoice') return 'invoice';
@@ -1455,6 +1474,18 @@ function docContent(kind,data,p){
       </div>
       ${docTable(['Item','Detail','Status'],[['Flight',b.flight_no||'-',b.status||'scheduled'],['Seat',b.seat_no||'-',b.ticket_status||'unissued'],['Check-in',data.checkins.length?data.checkins[0].status:'pending','-']])}
       <div class="doc-note"><b>Trace ID:</b> ${esc(b.trace_id||'-')}&nbsp;&nbsp;<b>Keep this document for airport check-in.</b></div>`;
+    case 'charter-quotation': return `
+      <div class="doc-cols">
+        <div style="flex:1">${kv('Charter No',data.charter?.charter_no||'-')}${kv('Client',data.charter?.client_name||'-')}${kv('Quote Date',data.charter?.created_at||'-')}</div>
+        <div style="flex:1">${kv('Currency',data.charter?.currency||data.booking?.currency||'USD')}${kv('Total Amount',moneyDoc(data.charter?.total_amount||data.booking?.total_amount||0,data.charter?.currency||data.booking?.currency||'USD'))}${kv('Status',data.charter?.status||'quoted')}</div>
+      </div>
+      <h4 class="doc-section-title">Journey</h4>
+      ${docTable(['Flight','Route','Date','Dep','Arr','Aircraft','Seats'],[[data.flight?.flight_no||data.booking?.flight_no||'-',(data.flight?.origin||data.booking?.origin||'')+' → '+(data.flight?.destination||data.booking?.destination||''),data.flight?.flight_date||data.booking?.flight_date||'-',data.flight?.dep_time||'-',data.flight?.arr_time||'-',data.flight?.aircraft||'-',data.flight?.seats||data.booking?.seat_no||'-']])}
+      <h4 class="doc-section-title">Passengers</h4>
+      ${docTable(['Name','Doc No','Seat','Meal'],(data.charter?.passengers||[]).map(p=>[p.name||'-',p.doc_no||'-',p.seat_no||'-',p.meal_pref||'-'])||[['-','-','-','-']])}
+      <h4 class="doc-section-title">Booking Reference</h4>
+      ${docTable(['PNR','Ticket','Status'],[[data.booking?.pnr||'-',data.booking?.ticket_number||'Not issued',data.booking?.booking_status||'pending']])}
+      <div class="doc-note">This charter quotation is prepared for the client named above. Acceptance converts to a confirmed booking.</div>`;
   }
   return `<div class="empty">Document content not configured for ${esc(kind)}.</div>`;
 }

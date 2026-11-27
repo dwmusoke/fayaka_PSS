@@ -7094,7 +7094,8 @@ class Handler(BaseHTTPRequestHandler):
             if not req:
                 return self._json({'error': 'Charter request not found'}, 404)
             flights = q(conn, "SELECT * FROM pss_charter_flights WHERE request_id=? AND tenant_id=? ORDER BY id DESC", (rid, tenant_id))
-        return self._json({'request': req, 'flights': flights})
+            booking = q(conn, "SELECT * FROM pss_bookings WHERE charter_id=? AND tenant_id=? ORDER BY id DESC LIMIT 1", (rid, tenant_id))
+        return self._json({'request': req, 'flights': flights, 'booking': booking})
 
     def api_pss_charter_quote(self, tenant_id, user_id, rid):
         rid = self._oid(rid)
