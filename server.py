@@ -1173,6 +1173,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self.api_inventory_market_refresh(tenant_id)
             if path == '/api/pss/inventory/help' and method == 'GET':
                 return self.api_inventory_help()
+            # AI smart features
+            if path == '/api/ai/nl-search' and method == 'POST':
+                return self.api_ai_nl_search(tenant_id, sess=sess)
+            if path == '/api/ai/seat-suggest' and method == 'POST':
+                return self.api_ai_seat_suggest(tenant_id, user_id, sess=sess)
+            if path == '/api/ai/ancillary-recommend' and method == 'GET':
+                return self.api_ai_ancillary_recommend(tenant_id, qs, sess=sess)
+            if path == '/api/ai/help-chat' and method == 'POST':
+                return self.api_ai_help_chat(tenant_id)
+            if path == '/api/ai/fraud-score' and method == 'POST':
+                return self.api_ai_fraud_score(tenant_id, data=None)
+            if path == '/api/ai/travel-summary' and method == 'GET':
+                return self.api_ai_travel_summary(tenant_id, qs)
+            if path == '/api/ai/fare-forecast' and method == 'GET':
+                return self.api_ai_fare_forecast(tenant_id, qs)
             if path.startswith('/api/pss/bookings/') and path.endswith('/ticket') and method == 'POST':
                 return self.api_pss_booking_ticket(tenant_id, user_id, path.split('/')[4], sess=sess)
             if path.startswith('/api/pss/bookings/') and path.endswith('/checkin') and method == 'POST':
@@ -5243,6 +5258,274 @@ class Handler(BaseHTTPRequestHandler):
                                  (tenant_id, market, r['origin'], r['destination'], r['flight_date'],
                                   demand, r['bookings'] or 0, r['revenue'] or 0, ts))
         return self._json({'ok': True, 'refreshed': len(rows)})
+
+    # ---------- AI Smart Features ----------
+    def _ai_parse_nl_search(self, text):
+        import re
+        t = (text or '').lower()
+        result = {'origin': None, 'destination': None, 'date': None, 'adults': 1, 'cabin': 'economy', 'trip_type': 'oneway'}
+        # airports (3-letter uppercase codes)
+        codes = re.findall(r'\b([A-Z]{3})\b', text or '')
+        # also try city names
+        city_map = {'kampala': 'EBB', 'entebbe': 'EBB', 'dubai': 'DXB', 'london': 'LHR',
+                    'nairobi': 'NBO', 'new york': 'JFK', 'amsterdam': 'AMS', 'doha': 'DOH',
+                    'addis': 'ADD', 'addis ababa': 'ADD'}
+        if len(codes) >= 2:
+            result['origin'] = codes[0]
+            result['destination'] = codes[1]
+        else:
+            for city, code in city_map.items():
+                if city in t:
+                    if result['origin'] is None:
+                        result['origin'] = code
+                    elif result['destination'] is None and code != result['origin']:
+                        result['destination'] = code
+        # passengers
+        m = re.search(r'(\d+)\s*(passenger|pax|adult|person|people|traveler)', t)
+        if m:
+            result['adults'] = max(1, min(9, int(m.group(1))))
+        m = re.search(r'for\s+(\d+)', t)
+        if m and result['adults'] == 1:
+            result['adults'] = max(1, min(9, int(m.group(1))))
+        # cabin
+        if 'business' in t: result['cabin'] = 'business'
+        elif 'first' in t: result['cabin'] = 'first'
+        elif 'premium' in t: result['cabin'] = 'premium'
+        # trip type
+        if 'round' in t or 'return' in t: result['trip_type'] = 'roundtrip'
+        # date
+        import datetime as _dt
+        if 'today' in t:
+            result['date'] = _dt.date.today().isoformat()
+        elif 'tomorrow' in t:
+            result['date'] = (_dt.date.today() + _dt.timedelta(days=1)).isoformat()
+        elif 'next week' in t:
+            result['date'] = (_dt.date.today() + _dt.timedelta(days=7)).isoformat()
+        else:
+            m = re.search(r'(\d{4}-\d{2}-\d{2})', t)
+            if m:
+                result['date'] = m.group(1)
+            else:
+                m = re.search(r'(\d{1,2})\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*', t)
+                if m:
+                    months = {'jan':1,'feb':2,'mar':3,'apr':4,'may':5,'jun':6,'jul':7,'aug':8,'sep':9,'oct':10,'nov':11,'dec':12}
+                    day = int(m.group(1)); mon = months.get(m.group(2)[:3])
+                    if mon:
+                        yr = _dt.date.today().year
+                        try:
+                            result['date'] = _dt.date(yr, mon, day).isoformat()
+                        except ValueError:
+                            pass
+        return result
+
+    def api_ai_nl_search(self, tenant_id, sess=None):
+        data = read_json(self)
+        query = str(data.get('query') or data.get('text') or '').strip()
+        parsed = self._ai_parse_nl_search(query)
+        # run actual search if origin+destination present
+        flights = []
+        if parsed.get('origin') and parsed.get('destination'):
+            with db() as conn:
+                sql = """SELECT id,flight_no,origin,destination,flight_date,dep_time,arr_time,aircraft,available_seats,base_fare,currency,status
+                         FROM pss_flights WHERE tenant_id=? AND LOWER(COALESCE(status,'scheduled'))='scheduled'
+                         AND origin=? AND destination=?"""
+                args = [tenant_id, parsed['origin'], parsed['destination']]
+                if parsed.get('date'):
+                    sql += " AND flight_date=?"; args.append(parsed['date'])
+                sql += " ORDER BY flight_date, dep_time LIMIT 20"
+                flights = q(conn, sql, args)
+        return self._json({'query': query, 'parsed': parsed, 'flights': flights, 'count': len(flights)})
+
+    def api_ai_seat_suggest(self, tenant_id, user_id, sess=None):
+        data = read_json(self)
+        bid = self._oid(data.get('booking_id') or data.get('checkin_id'))
+        prefs = data.get('preferences') or {}
+        with db() as conn:
+            # available seats from flight
+            booking = None
+            if bid:
+                booking = q(conn, "SELECT * FROM pss_bookings WHERE id=? AND tenant_id=?", (bid, tenant_id), one=True)
+            fid = self._oid(data.get('flight_id') or (booking.get('flight_id') if booking else None))
+            flight = q(conn, "SELECT * FROM pss_flights WHERE id=? AND tenant_id=?", (fid, tenant_id), one=True) if fid else None
+            taken = set()
+            for r in q(conn, "SELECT seat_no FROM pss_checkins WHERE tenant_id=? AND booking_id IN (SELECT id FROM pss_bookings WHERE flight_id=? AND tenant_id=?)", (tenant_id, fid, tenant_id)):
+                if r.get('seat_no'):
+                    taken.add(str(r['seat_no']).upper())
+            # generate seat suggestions
+            rows = int((flight.get('total_seats') or 180) / 6) if flight else 30
+            cols = ['A','B','C','D','E','F']
+            def _bool(v): return v in (True, 1, '1', 'true', 'yes', 'True')
+            window_pref = _bool(prefs.get('window'))
+            aisle_pref = _bool(prefs.get('aisle'))
+            front_pref = _bool(prefs.get('front'))
+            suggestions = []
+            for r in range(1, rows + 1):
+                for ci, col in enumerate(cols):
+                    seat = f"{r}{col}"
+                    if seat.upper() in taken:
+                        continue
+                    score = 0
+                    if window_pref and col in ('A','F'): score += 3
+                    if aisle_pref and col in ('C','D'): score += 3
+                    if front_pref and r <= 5: score += 2
+                    if not window_pref and not aisle_pref:
+                        score += 1
+                    suggestions.append({'seat': seat, 'score': score, 'row': r, 'col': col})
+            suggestions.sort(key=lambda s: (-s['score'], s['row']))
+            top = suggestions[:8]
+        return self._json({'flight_id': fid, 'booking_id': bid, 'suggestions': top, 'taken_count': len(taken)})
+
+    def api_ai_ancillary_recommend(self, tenant_id, qs, sess=None):
+        # recommend ancillaries based on route/passenger history
+        flight_id = self._oid((qs.get('flight_id') or [''])[0])
+        booking_id = self._oid((qs.get('booking_id') or [''])[0])
+        with db() as conn:
+            flight = q(conn, "SELECT * FROM pss_flights WHERE id=? AND tenant_id=?", (flight_id, tenant_id), one=True) if flight_id else None
+            # frequency of ancillary purchases on this route
+            route = (flight.get('origin') + '-' + flight.get('destination')) if flight else None
+            anc_rows = q(conn, """SELECT a.code, a.name, a.category, a.price, COUNT(s.id) cnt
+                                  FROM pss_ancillaries a
+                                  LEFT JOIN pss_ancillary_sales s ON s.ancillary_id=a.id AND s.tenant_id=a.tenant_id
+                                  WHERE a.tenant_id=? AND (a.status IS NULL OR a.status='active')
+                                  GROUP BY a.id ORDER BY cnt DESC, a.price ASC LIMIT 8""", (tenant_id,))
+            # also get already-purchased for this booking
+            purchased = set()
+            if booking_id:
+                for r in q(conn, "SELECT ancillary_id FROM pss_ancillary_sales WHERE tenant_id=? AND booking_id=?", (tenant_id, booking_id)):
+                    purchased.add(r.get('ancillary_id'))
+            recs = []
+            for a in anc_rows:
+                recs.append({'code': a.get('code'), 'name': a.get('name'), 'category': a.get('category'),
+                             'price': a.get('price'), 'popularity': a.get('cnt') or 0,
+                             'already_purchased': a.get('id') in purchased})
+        return self._json({'flight_id': flight_id, 'route': route, 'recommendations': recs})
+
+    def api_ai_help_chat(self, tenant_id):
+        data = read_json(self)
+        query = str(data.get('query') or data.get('message') or '').strip().lower()
+        # keyword search over help articles + docs
+        articles = [
+            {'title': 'Flight date inventory', 'body': 'Open Flight Inventory, choose a flight date tab, then inspect legs, segments, reservation impact and capacity.'},
+            {'title': 'Leg and Segment controls', 'body': 'Use Legs and Segments tabs to add, edit or delete itinerary structure. Segment-level availability is published per segment.'},
+            {'title': 'Availability and POS', 'body': 'Choose Point of Sale and subclass, then Publish availability. Calculated as capacity-committed with Segment limit, Gating, POS subclass logic, TIA and nesting.'},
+            {'title': 'Business rules and TIA', 'body': 'Rules support Segment limit, Gating, POS subclass logic, Hold expiry. Scope by flight/date/segment, POS/subclass, nesting.'},
+            {'title': 'Overbooking', 'body': 'Overbooking tab lists flights where committed reservations exceed capacity. Actions: raise capacity, deny sale, reaccommodate.'},
+            {'title': 'Uncommitted bookings', 'body': 'Holds expire automatically. Confirm converts hold to reservation; release restores one seat.'},
+            {'title': 'Market data & valuation', 'body': 'Market data snapshots internal route/date demand and average fare. Active valuation computes load-factor value.'},
+            {'title': 'Self-service support', 'body': 'Use Help tab first. If action fails, copy error/toast and check docs or contact administrator.'},
+            {'title': 'Refund process', 'body': 'Open payment, click Refund, fill amount/reason/approval. Pending refunds require approval before processing.'},
+            {'title': 'Ticket issuance', 'body': 'Partner Workspace shows unissued bookings. Click Issue ticket to consume agency stock allocation.'},
+            {'title': 'Stock allocation', 'body': 'Allocate stock to agency with unit price. Wallet debited on allocation. Insufficient credit returns 402.'},
+            {'title': 'Charter booking', 'body': 'Create charter request, issue quote, confirm (creates flight + booking + ticket), add passengers, complete.'},
+            {'title': 'Travel documents', 'body': 'Add passport/visa/insurance with expiry dates. System sends expiry reminders 30 days before.'},
+            {'title': 'Document sharing', 'body': 'Share records with clients via secure token links. Recipients can view PDF without login.'},
+        ]
+        # simple keyword scoring
+        words = [w for w in query.split() if len(w) > 2]
+        scored = []
+        for a in articles:
+            text = (a['title'] + ' ' + a['body']).lower()
+            score = sum(1 for w in words if w in text)
+            if score > 0:
+                scored.append((score, a))
+        scored.sort(key=lambda x: -x[0])
+        matches = [a for _, a in scored[:5]]
+        if not matches:
+            matches = articles[:3]
+        # generate a simple answer
+        answer = 'Based on your question, here are relevant topics:\n' + '\n'.join(f"- {a['title']}: {a['body']}" for a in matches)
+        return self._json({'query': query, 'answer': answer, 'articles': matches})
+
+    def api_ai_fraud_score(self, tenant_id, data=None):
+        data = data or read_json(self)
+        score = 0
+        reasons = []
+        amount = float(data.get('amount') or 0)
+        # heuristic rules
+        if amount > 5000:
+            score += 30; reasons.append('High transaction amount')
+        if amount > 10000:
+            score += 20; reasons.append('Very high transaction amount')
+        method = str(data.get('method') or '').lower()
+        if method in ('cash',):
+            score += 5; reasons.append('Cash payment')
+        # rapid successive payments from same IP
+        ip = self._client_ip() if hasattr(self, '_client_ip') else ''
+        # check recent payments count for this tenant
+        with db() as conn:
+            recent = q(conn, "SELECT COUNT(*) n FROM pss_payments WHERE tenant_id=? AND created_at > datetime('now','-1 hour')", (tenant_id,), one=True)
+            cnt = int((recent or {}).get('n') or 0)
+            if cnt > 5:
+                score += 25; reasons.append(f'{cnt} payments in last hour')
+            # check if amount matches a round number (suspicious)
+            if amount > 0 and amount == int(amount) and amount % 100 == 0 and amount >= 1000:
+                score += 10; reasons.append('Round-number large amount')
+            # new customer with large payment
+            bid = self._oid(data.get('booking_id'))
+            if bid:
+                booking = q(conn, "SELECT created_at, payment_status FROM pss_bookings WHERE id=? AND tenant_id=?", (bid, tenant_id), one=True)
+                if booking and str(booking.get('payment_status') or '') == 'pending':
+                    # first payment on booking
+                    pass
+        level = 'low' if score < 30 else ('medium' if score < 60 else 'high')
+        return self._json({'score': score, 'level': level, 'reasons': reasons, 'recommendation': 'approve' if level == 'low' else ('review' if level == 'medium' else 'block')})
+
+    def api_ai_travel_summary(self, tenant_id, qs):
+        bid = self._oid((qs.get('booking_id') or qs.get('id') or [''])[0])
+        with db() as conn:
+            b = q(conn, "SELECT * FROM pss_bookings WHERE id=? AND tenant_id=?", (bid, tenant_id), one=True)
+            if not b:
+                return self._json({'error': 'Booking not found'}, 404)
+            cust = q(conn, "SELECT * FROM customers WHERE id=? AND tenant_id=?", (self._oid(b.get('customer_id')), tenant_id), one=True) if b.get('customer_id') else None
+            payments = q(conn, "SELECT * FROM pss_payments WHERE booking_id=? AND tenant_id=?", (bid, tenant_id))
+            checkins = q(conn, "SELECT * FROM pss_checkins WHERE booking_id=? AND tenant_id=?", (bid, tenant_id))
+            pax = json.loads(b.get('segments_json') or '[]') if b.get('segments_json') else []
+        name = b.get('passenger_name') or (cust.get('name') if cust else 'Passenger')
+        route = f"{b.get('origin') or '-'} to {b.get('destination') or '-'}"
+        segs = b.get('segments_json')
+        try:
+            segs = json.loads(segs) if isinstance(segs, str) else (segs or [])
+        except Exception:
+            segs = []
+        seg_desc = ''
+        if segs:
+            seg_desc = '; '.join(f"{s.get('flight_no','')} {s.get('origin','')}-{s.get('destination','')} on {s.get('flight_date','')}" for s in segs)
+        pay_desc = ''
+        if payments:
+            pay_desc = f" Payment of {b.get('currency','USD')} {sum(float(p.get('amount') or 0) for p in payments):,.2f} recorded ({', '.join(p.get('status','') for p in payments)})."
+        checkin_desc = ''
+        if checkins:
+            checkin_desc = f" Checked in: seat {checkins[0].get('seat_no') or 'unassigned'}, status {checkins[0].get('status') or 'pending'}."
+        summary = (f"Booking {b.get('pnr')} for {name}: {route} on {b.get('flight_date') or 'TBD'}. "
+                   f"Ticket {b.get('ticket_number') or 'not yet issued'} ({b.get('ticket_status') or 'unissued'}). "
+                   f"Booking status: {b.get('booking_status') or 'confirmed'}, payment: {b.get('payment_status') or 'pending'}. "
+                   f"{seg_desc}{pay_desc}{checkin_desc}")
+        return self._json({'booking_id': bid, 'pnr': b.get('pnr'), 'summary': summary})
+
+    def api_ai_fare_forecast(self, tenant_id, qs):
+        # simple demand-based fare forecast from market data + booking counts
+        origin = (qs.get('origin') or [''])[0]
+        destination = (qs.get('destination') or [''])[0]
+        with db() as conn:
+            flights = q(conn, "SELECT * FROM pss_flights WHERE tenant_id=? AND origin=? AND destination=? ORDER BY flight_date", (tenant_id, origin, destination))
+            # booking counts per flight date
+            demand = {}
+            for f in flights:
+                cnt = q(conn, "SELECT COUNT(*) n FROM pss_bookings WHERE tenant_id=? AND flight_id=?", (tenant_id, f['id']), one=True)
+                demand[f.get('flight_date')] = int((cnt or {}).get('n') or 0)
+            forecasts = []
+            for f in flights:
+                d = demand.get(f.get('flight_date'), 0)
+                cap = int(f.get('total_seats') or 1)
+                load = d / cap if cap else 0
+                base = float(f.get('base_fare') or 250)
+                # simple forecast: higher load → higher fare
+                forecast_fare = base * (1 + load * 0.5)
+                forecasts.append({'flight_no': f.get('flight_no'), 'flight_date': f.get('flight_date'),
+                                 'available_seats': f.get('available_seats'), 'current_fare': base,
+                                 'forecast_fare': round(forecast_fare, 2), 'load_factor': round(load, 3),
+                                 'demand': d, 'recommendation': 'increase' if load > 0.7 else ('hold' if load > 0.3 else 'discount')})
+        return self._json({'origin': origin, 'destination': destination, 'forecasts': forecasts})
 
     def api_inventory_help(self):
         return self._json({

@@ -209,6 +209,7 @@ const viewMeta = {
   developer: ['Developer Center','Partner API keys, webhooks, delivery logs and API documentation','Control Center'],
   onboarding: ['Airline Onboarding','Guided setup for a new airline tenant and readiness checklist','Setup'],
   airlines: ['Airlines / Tenants','All provisioned airline tenants, codes, plans and usage','Setup'],
+  'ai-assistant': ['AI Assistant','Natural language search, smart recommendations, fraud scoring and travel summaries','Intelligence'],
   refunds: ['Refund Management','GDS/LCC refunds, policy checks, auto-void and refund tracking','Airline Finance'],
   coupons: ['Coupon Reporting','Coupon creation, cancellations and pre-billing control','Airline Finance'],
   loyalty: ['Loyalty Reporting','Frequent traveler IDs, coupon activity and customer value','Airline Finance'],
@@ -260,6 +261,7 @@ const VIEW_ACTIONS = {
   orders:[{label:'View',action:'view'},{label:'Edit',action:'edit'},{label:'Duplicate',action:'duplicate'},{label:'Invoice',action:'pdf',pdf:'order'},{label:'Share',action:'share'}],
   'pss-bookings':[{label:'View',action:'view'},{label:'Edit',action:'edit'},{label:'Ticket',action:'ticket'},{label:'Itinerary',action:'pdf',pdf:'itinerary'},{label:'Booking confirmation',action:'pdf',pdf:'booking-confirmation'},{label:'Travel documents',action:'travel-docs'},{label:'Documents',action:'docs'},{label:'Share',action:'share'},{label:'Cancel',action:'cancel',danger:true}],
   'pss-charters':[{label:'View',action:'view'},{label:'Quote',action:'charter-quote'},{label:'Quotation',action:'charter-quotation'},{label:'Confirm',action:'charter-confirm'},{label:'Passengers',action:'charter-passengers'},{label:'Complete',action:'charter-complete'},{label:'Edit',action:'edit'},{label:'Delete',action:'delete',danger:true}],
+  'ai-assistant':[{label:'View',action:'view'}],
   'pss-charter-flights':[{label:'View',action:'view'},{label:'Edit',action:'edit'},{label:'Delete',action:'delete',danger:true}],
   'pss-agencies':[{label:'View',action:'view'},{label:'Edit',action:'edit'},{label:'Wallet & stock',action:'goto-agency-wallet'},{label:'Allocate stock',action:'goto-stock'},{label:'Partner login',action:'goto-partner-users'},{label:'Delete',action:'delete',danger:true}],
   'pss-payments':[{label:'View',action:'view'},{label:'Receipt',action:'receipt',pdf:'receipt'},{label:'Edit',action:'edit'},{label:'Share',action:'share'},{label:'Refund',action:'refund',danger:true}],
@@ -2820,6 +2822,69 @@ async function render_developer(el){
   $$('.dev-retry',el).forEach(b=>b.onclick=async()=>{ try{ await api(`/api/developer/webhooks/${b.dataset.id}/retry`,{method:'POST',body:'{}'}); toast('Webhook retried'); render_developer(el); }catch(err){ toast(err.message,'error'); } });
 }
 
+async function render_ai_assistant(el){
+  const meta = viewMeta['ai-assistant'];
+  el.innerHTML = pageHead(meta[0], meta[1], '') +
+    `<div class="grid" style="gap:16px">
+      <div class="panel"><div class="panel-head"><h3>Natural Language Flight Search</h3></div><div class="panel-body">
+        <div class="form-cols"><div style="flex:2"><input id="ai-nl-q" class="form-input" placeholder="e.g. flights from EBB to DXB next week 2 passengers business" style="width:100%"></div><div><button class="mini-btn primary" id="ai-nl-btn">Search</button></div></div>
+        <div id="ai-nl-result" class="muted small" style="margin-top:10px"></div>
+      </div></div>
+      <div class="panel"><div class="panel-head"><h3>AI Help Chat</h3></div><div class="panel-body">
+        <div class="form-cols"><div style="flex:2"><input id="ai-chat-q" class="form-input" placeholder="Ask anything about the system..." style="width:100%"></div><div><button class="mini-btn primary" id="ai-chat-btn">Ask</button></div></div>
+        <div id="ai-chat-result" class="muted small" style="margin-top:10px;white-space:pre-wrap"></div>
+      </div></div>
+      <div class="panel"><div class="panel-head"><h3>Fraud Score (test)</h3></div><div class="panel-body">
+        <div class="form-cols"><div><label>Amount</label><input id="ai-fraud-amt" type="number" value="15000" style="width:100%"></div><div><label>Method</label><select id="ai-fraud-method"><option>card</option><option>cash</option><option>bank</option></select></div><div><button class="mini-btn primary" id="ai-fraud-btn" style="margin-top:20px">Score</button></div></div>
+        <div id="ai-fraud-result" class="muted small" style="margin-top:10px"></div>
+      </div></div>
+      <div class="panel"><div class="panel-head"><h3>Travel Summary</h3></div><div class="panel-body">
+        <div class="form-cols"><div><label>Booking ID</label><input id="ai-summary-id" type="number" value="1" style="width:100%"></div><div><button class="mini-btn primary" id="ai-summary-btn" style="margin-top:20px">Generate</button></div></div>
+        <div id="ai-summary-result" class="muted small" style="margin-top:10px;white-space:pre-wrap"></div>
+      </div></div>
+      <div class="panel"><div class="panel-head"><h3>Fare Forecast</h3></div><div class="panel-body">
+        <div class="form-cols"><div><label>Origin</label><input id="ai-forecast-orig" value="EBB" style="width:100%"></div><div><label>Destination</label><input id="ai-forecast-dest" value="NBO" style="width:100%"></div><div><button class="mini-btn primary" id="ai-forecast-btn" style="margin-top:20px">Forecast</button></div></div>
+        <div id="ai-forecast-result" class="muted small" style="margin-top:10px"></div>
+      </div></div>
+    </div>`;
+  const nlBtn = $('#ai-nl-btn', el);
+  if(nlBtn) nlBtn.onclick = async () => {
+    const q = $('#ai-nl-q', el).value;
+    const r = await api('/api/ai/nl-search', {method:'POST', body:JSON.stringify({query:q})});
+    const res = $('#ai-nl-result', el);
+    if(res) res.innerHTML = `<b>Parsed:</b> ${esc(JSON.stringify(r.parsed))}<br><b>Flights found:</b> ${r.count}<br>` + (r.flights||[]).map(f=>`<div class="doc-hub-row">${esc(f.flight_no)} ${esc(f.origin)}→${esc(f.destination)} ${esc(f.flight_date)} ${esc(f.available_seats)} seats ${esc(f.base_fare)} ${esc(f.currency)}</div>`).join('');
+  };
+  const chatBtn = $('#ai-chat-btn', el);
+  if(chatBtn) chatBtn.onclick = async () => {
+    const q = $('#ai-chat-q', el).value;
+    const r = await api('/api/ai/help-chat', {method:'POST', body:JSON.stringify({query:q})});
+    const res = $('#ai-chat-result', el);
+    if(res) res.textContent = r.answer || '';
+  };
+  const fraudBtn = $('#ai-fraud-btn', el);
+  if(fraudBtn) fraudBtn.onclick = async () => {
+    const amt = parseFloat($('#ai-fraud-amt', el).value) || 0;
+    const method = $('#ai-fraud-method', el).value;
+    const r = await api('/api/ai/fraud-score', {method:'POST', body:JSON.stringify({amount:amt, method})});
+    const res = $('#ai-fraud-result', el);
+    if(res) res.innerHTML = `<b>Score:</b> ${r.score} (${r.level}) → ${r.recommendation}<br>${(r.reasons||[]).map(x=>`• ${esc(x)}`).join('<br>')}`;
+  };
+  const sumBtn = $('#ai-summary-btn', el);
+  if(sumBtn) sumBtn.onclick = async () => {
+    const id = $('#ai-summary-id', el).value;
+    const r = await api('/api/ai/travel-summary?booking_id='+encodeURIComponent(id));
+    const res = $('#ai-summary-result', el);
+    if(res) res.textContent = r.summary || '';
+  };
+  const fcBtn = $('#ai-forecast-btn', el);
+  if(fcBtn) fcBtn.onclick = async () => {
+    const o = $('#ai-forecast-orig', el).value;
+    const d = $('#ai-forecast-dest', el).value;
+    const r = await api('/api/ai/fare-forecast?origin='+encodeURIComponent(o)+'&destination='+encodeURIComponent(d));
+    const res = $('#ai-forecast-result', el);
+    if(res) res.innerHTML = (r.forecasts||[]).map(f=>`<div class="doc-hub-row">${esc(f.flight_no)} ${esc(f.flight_date)}: ${esc(f.current_fare)} → ${esc(f.forecast_fare)} (${esc(f.recommendation)}) load ${esc(f.load_factor)}</div>`).join('') || '<div class="muted">No flights found</div>';
+  };
+}
 async function render_airlines(el){
   const meta = viewMeta.airlines;
   try{
