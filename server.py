@@ -3223,10 +3223,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def _sync_travelers_from_pss_bookings(self, conn, tenant_id):
         # Auto-create traveler profiles from PSS booking passengers
-        rows = q(conn, """SELECT id, passenger_name, contact_email, contact_phone, doc_no, dob, gender,
-                                 nationality, passport_no, passport_expiry, passport_country, title,
-                                 customer_id, pnr, flight_date, origin, destination, flight_no
-                          FROM pss_bookings WHERE tenant_id=?""", (tenant_id,))
+        rows = q(conn, """SELECT b.id, b.passenger_name, b.contact_email, b.contact_phone, b.doc_no, b.dob, b.gender,
+                                 b.nationality, b.passport_no, b.passport_expiry, b.passport_country, b.title,
+                                 b.customer_id, b.pnr, f.flight_date, f.origin, f.destination, f.flight_no
+                          FROM pss_bookings b LEFT JOIN pss_flights f ON f.id=b.flight_id
+                          WHERE b.tenant_id=?""", (tenant_id,))
         for b in rows:
             name = (b.get('passenger_name') or '').strip()
             if not name:
@@ -3261,11 +3262,11 @@ class Handler(BaseHTTPRequestHandler):
     def _traveler_list_rows(self, tenant_id):
         with db() as conn:
             rows = q(conn, """SELECT t.*, c.name customer_name,
-                              (SELECT COUNT(*) FROM order_passengers p WHERE p.traveler_id=t.id) trips,
+                              (SELECT COUNT(*) FROM order_passengers p WHERE p.traveler_id=t.id) + (SELECT COUNT(*) FROM pss_bookings b WHERE b.tenant_id=t.tenant_id AND lower(trim(b.passenger_name))=lower(trim(t.full_name))) trips,
                               (SELECT MIN(o.travel_start) FROM order_passengers p JOIN orders o ON o.id=p.order_id WHERE p.traveler_id=t.id AND o.travel_start>=date('now')) next_travel,
                               (SELECT COUNT(*) FROM order_passengers p JOIN orders o ON o.id=p.order_id WHERE p.traveler_id=t.id AND o.travel_start<=date('now') AND (o.travel_end IS NULL OR o.travel_end>=date('now'))) on_trip,
                               (SELECT COALESCE(SUM(o.total_sell-o.total_cost),0) FROM order_passengers p JOIN orders o ON o.id=p.order_id WHERE p.traveler_id=t.id) collection,
-                              (SELECT COALESCE(SUM(o.total_sell),0) FROM order_passengers p JOIN orders o ON o.id=p.order_id WHERE p.traveler_id=t.id) spend
+                              (SELECT COALESCE(SUM(o.total_sell),0) FROM order_passengers p JOIN orders o ON o.id=p.order_id WHERE p.traveler_id=t.id) + (SELECT COALESCE(SUM(b.total_amount),0) FROM pss_bookings b WHERE b.tenant_id=t.tenant_id AND lower(trim(b.passenger_name))=lower(trim(t.full_name))) spend
                               FROM travelers t LEFT JOIN customers c ON c.id=t.customer_id WHERE t.tenant_id=? ORDER BY t.id DESC LIMIT 500""", (tenant_id,))
         for r in rows:
             r['days_to_next'] = self._days_to_date(r.get('next_travel'))
