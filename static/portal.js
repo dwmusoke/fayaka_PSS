@@ -269,9 +269,8 @@ async function searchFlights(){
     const segs = searchData.segments||[];
     msg.textContent = `${segs.reduce((a,b)=>a+b.length,0)} flight(s) found`;
     renderResults();
-  }catch(e){ msg.textContent = e.message; }
+  }catch(e){ msg.textContent = e.message; res.classList.add('hidden'); res.innerHTML=''; }
 }
-
 function renderResults(){
   if(!searchData) return;
   const res = document.getElementById('results');
@@ -448,7 +447,7 @@ function renderPassengerForm(){
   });
   const baseSubtotal = segFares.reduce((a,{fare})=>a + fare*totalPax, 0);
   const taxTotal = segFares.reduce((a,{tax})=>a + tax*taxPax, 0);
-  const ancTotal = ancOptions.reduce((a,x)=>a + parseFloat(x.price||0), 0);
+  const ancTotal = 0; // ancillaries are optional; selected ones added on submit
   const grandTotal = baseSubtotal + taxTotal + ancTotal;
   const box = document.getElementById('booking-form');
   box.innerHTML = `<h3>Passenger details</h3><div class="muted" style="margin-bottom:10px">${totalPax} passenger(s) · ${selected.length} segment(s)</div>
@@ -687,12 +686,13 @@ async function portalLogin(){
   const msg=document.getElementById('auth-msg');
   try{
     const r=await api('/api/portal/login',{method:'POST',body:JSON.stringify({tenant:tenant(),email:document.getElementById('l-email').value.trim(),password:document.getElementById('l-password').value})});
+    if(!r.customer) throw new Error('Login failed: no customer data returned');
     portalCustomer=r.customer; msg.textContent='Signed in as '+esc(r.customer.full_name);
     await loadMyTrips();
   }catch(e){ msg.textContent=e.message; }
 }
 async function portalLogout(){
-  await api('/api/portal/logout',{method:'POST',body:'{}'});
+  try{ await api('/api/portal/logout',{method:'POST',body:'{}'}); }catch(e){}
   portalCustomer=null; document.getElementById('auth-box').classList.remove('hidden');
   document.getElementById('my-trips').classList.add('hidden');
 }
@@ -726,7 +726,7 @@ async function loadMyTrips(){
         <div style="margin-top:6px">${x.has_file?`<button class="pdf-link muted" onclick="openStoredDoc(${js(x.id)},'',${js(docLabel(x.doc_type)+' '+(x.doc_no||''))},${js(x.mime_type)})">View document</button>`:'<span class="muted">No file attached</span>'}</div></div>`).join('')
         || 'No traveller documents uploaded';
     }).catch(()=>{});
-  }catch(e){ /* not signed in */ }
+  }catch(e){ console.warn('loadMyTrips:', e.message); }
 }
 async function uploadDoc(prefix, pnr, reload){
   const msg=document.getElementById(prefix+'-msg');
