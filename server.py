@@ -3221,6 +3221,43 @@ class Handler(BaseHTTPRequestHandler):
                 events.append({'type': 'Travel', 'date': o.get('travel_start'), 'days': days, 'label': f"{o.get('product_type') or 'Travel'} to {o.get('destination') or '-'} in {days} days"})
         return events
 
+    def _sync_travelers_from_pss_bookings(self, conn, tenant_id):
+        # Auto-create traveler profiles from PSS booking passengers
+        rows = q(conn, """SELECT id, passenger_name, contact_email, contact_phone, doc_no, dob, gender,
+                                 nationality, passport_no, passport_expiry, passport_country, title,
+                                 customer_id, pnr, flight_date, origin, destination, flight_no
+                          FROM pss_bookings WHERE tenant_id=?""", (tenant_id,))
+        for b in rows:
+            name = (b.get('passenger_name') or '').strip()
+            if not name:
+                continue
+            existing = q(conn, "SELECT id FROM travelers WHERE tenant_id=? AND lower(trim(full_name))=lower(trim(?))",
+                         (tenant_id, name), one=True)
+            if existing:
+                continue
+            data = {
+                'full_name': name,
+                'title': b.get('title'),
+                'traveler_type': b.get('passenger_type') or 'ADT',
+                'email': b.get('contact_email'),
+                'phone': b.get('contact_phone'),
+                'doc_no': b.get('doc_no'),
+                'dob': b.get('dob'),
+                'gender': b.get('gender'),
+                'nationality': b.get('nationality'),
+                'passport_no': b.get('passport_no'),
+                'passport_expiry': b.get('passport_expiry'),
+                'passport_country': b.get('passport_country'),
+                'customer_id': b.get('customer_id'),
+                'notes': f"Auto-created from booking {b.get('pnr')}",
+            }
+            try:
+                tid = self._insert_traveler(conn, tenant_id, data)
+                if tid:
+                    self._ensure_customer_from_traveler(conn, tenant_id, tid, data)
+            except Exception:
+                pass
+
     def _traveler_list_rows(self, tenant_id):
         with db() as conn:
             rows = q(conn, """SELECT t.*, c.name customer_name,
@@ -3237,6 +3274,8 @@ class Handler(BaseHTTPRequestHandler):
         return rows
 
     def api_travelers_list(self, tenant_id):
+        with db() as conn:
+            self._sync_travelers_from_pss_bookings(conn, tenant_id)
         return self._json({'travelers': self._traveler_list_rows(tenant_id)})
 
     def api_traveler_detail(self, tenant_id, tid):

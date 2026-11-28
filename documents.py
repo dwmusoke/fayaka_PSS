@@ -128,11 +128,29 @@ def _barcode128(c, value, x, y, width=300, height=34):
     text = str(value if value not in (None, '') else '')
     try:
         widget = code128.Code128(text or ' ', barHeight=height, barWidth=0.32, humanReadable=False)
-        bw, bh = float(widget.width or 0), float(widget.height or 0)
-        if bw <= 0 or bh <= 0:
-            raise ValueError('zero size')
-        # Code128 is a Flowable, not a Shape; draw it directly with its own drawOn
-        widget.drawOn(c, x, y)
+        widget.validate()
+        widget.encode()
+        widget.decompose()
+        decomposed = getattr(widget, 'decomposed', '') or ''
+        if not decomposed:
+            raise ValueError('no decomposed pattern')
+        widths = {'a': 1, 'b': 2, 'c': 3, 'd': 4, 'A': 1, 'B': 2, 'C': 3, 'D': 4}
+        segments = [(ch.isupper(), widths.get(ch, 1)) for ch in decomposed]
+        total_units = sum(u for _, u in segments)
+        if total_units <= 0:
+            raise ValueError('zero total units')
+        mod = 0.32
+        total_units = sum(u for _, u in segments)
+        if total_units <= 0:
+            raise ValueError('zero total units')
+        scale_x = width / (total_units * mod)
+        pos = 0.0
+        for is_bar, units in segments:
+            seg_len = units * mod * scale_x
+            if is_bar:
+                c.setFillColor(colors.black)
+                c.rect(x + pos, y, seg_len, height, stroke=0, fill=1)
+            pos += seg_len
         return
     except Exception as e:
         import sys
@@ -143,9 +161,6 @@ def _barcode128(c, value, x, y, width=300, height=34):
         pass
     try:
         c.setFont('Helvetica', 8)
-    except Exception:
-        pass
-    try:
         c.drawString(x, y, _fit(text, 'Helvetica', 8, max(1, width)) or text[:200])
     except Exception:
         pass
@@ -609,12 +624,10 @@ def _boarding_card(c, y, branding, ci, bk, payload, bags=None, bcbp=None):
     qr_size = 74
     qr_x = x + w - qr_size - 14
     _qr(c, code, qr_x, bottom + 8, qr_size)
-    # Linear barcode (Code 128) drawn vertically on the right side to avoid
-    # overlapping the BCBP/security text block on the left.
+    # Linear barcode (Code 128) drawn horizontally in the gap between the last
+    # field row and the dashed divider, so it never overlaps text or the QR code.
     c.saveState()
-    c.translate(x + w - 30, bottom + 8)
-    c.rotate(90)
-    _barcode128(c, code, 0, 0, width=qr_size, height=22)
+    _barcode128(c, code, x + 18, top - 276, width=w - 36, height=16)
     c.restoreState()
     code_w = w - qr_size - 46
     c.setFillColor(muted)
