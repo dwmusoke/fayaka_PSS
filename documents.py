@@ -624,10 +624,9 @@ def _boarding_card(c, y, branding, ci, bk, payload, bags=None, bcbp=None):
     qr_size = 74
     qr_x = x + w - qr_size - 14
     _qr(c, code, qr_x, bottom + 8, qr_size)
-    # Linear barcode (Code 128) drawn horizontally in the gap between the last
-    # field row and the dashed divider, so it never overlaps text or the QR code.
-    c.saveState()
-    _barcode128(c, code, x + 18, top - 276, width=w - 36, height=16)
+    # Linear barcode (Code 128) is omitted from the card interior to avoid
+    # overlapping the BCBP text block and QR code. The QR code already encodes
+    # the full BCBP payload for scanner use.
     c.restoreState()
     code_w = w - qr_size - 46
     c.setFillColor(muted)
