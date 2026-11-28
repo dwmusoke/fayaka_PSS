@@ -627,7 +627,6 @@ def _boarding_card(c, y, branding, ci, bk, payload, bags=None, bcbp=None):
     # Linear barcode (Code 128) is omitted from the card interior to avoid
     # overlapping the BCBP text block and QR code. The QR code already encodes
     # the full BCBP payload for scanner use.
-    c.restoreState()
     code_w = w - qr_size - 46
     c.setFillColor(muted)
     c.setFont('Helvetica-Bold', 7.5)
