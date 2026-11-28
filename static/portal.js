@@ -245,7 +245,10 @@ const airportLabel = (f, code) => {
 async function searchFlights(){
   const msg = document.getElementById('search-msg');
   const res = document.getElementById('results');
-  msg.textContent = 'Searching...'; res.classList.add('hidden');
+  msg.innerHTML = '<span style="display:inline-flex;align-items:center;gap:8px"><span style="width:14px;height:14px;border:2px solid #0e7490;border-top-color:transparent;border-radius:50%;animation:spin .7s linear infinite;display:inline-block"></span> Searching flights...</span>';
+  res.classList.remove('hidden');
+  res.innerHTML = `<div style="display:grid;gap:12px;margin-top:12px">${Array(3).fill(0).map(()=>`<div style="height:140px;border-radius:18px;background:linear-gradient(90deg,#f1f5f9 25%,#e2e8f0 50%,#f1f5f9 75%);background-size:200% 100%;animation:shimmer 1.5s infinite"></div>`).join('')}</div>`;
+  res.classList.remove('hidden');
   const q = new URLSearchParams({tenant:tenant(), trip_type:tripType, cabin:document.getElementById('f-cabin').value,
     adults:pax.adults, children:pax.children, infants:pax.infants});
   if(tripType==='multicity'){
@@ -278,31 +281,42 @@ function renderResults(){
   const logoHtml = portalBranding?.logo_data
     ? `<img src="${esc(portalBranding.logo_data)}" alt="" />`
     : esc((portalBranding?.code || searchData.airline?.code || 'FA').slice(0,2).toUpperCase());
+  const totalPax = searchData.passengers?.total || 1;
+  const cabin = searchData.cabin || 'Y';
+  const tripType = searchData.trip_type || 'oneway';
   res.innerHTML = `<div class="avail-summary">
-      <div><b>${esc(airline)}</b><small>${esc(searchData.cabin||'Y')} cabin · ${esc(searchData.trip_type||'oneway')} · ${esc(searchData.passengers?.total||1)} passenger(s)</small></div>
+      <div>
+        <b>${esc(airline)}</b>
+        <small>${esc(cabin)} cabin · ${esc(tripType)} · ${esc(totalPax)} passenger(s) · ${segs.reduce((a,b)=>a+b.length,0)} flight(s) found</small>
+      </div>
       <div class="avail-badges">
         ${tag('Online booking', 'good')}${tag(caps.ndc ? 'NDC offers' : '', 'info')}${tag(caps.seat_map ? 'Seat maps' : '', 'info')}${tag('Live availability', 'good')}
       </div>
-    </div>` + segs.map((list,i)=>`<div class="seg-title">Segment ${i+1}${segs.length===2?(i===0?' - Outbound':' - Return'):''} · ${list.length} flight(s)</div>` +
+    </div>` + segs.map((list,i)=>`<div class="seg-title">${segs.length===2?(i===0?'✈ Outbound':'✈ Return'):'✈ Segment '+(i+1)} · ${list.length} option${list.length===1?'':'s'}</div>` +
       (list.length ? list.map((f,j)=>{
         const seats = f.seats_available ?? f.available_seats;
         const fare = parseFloat(f.fare||0)||0;
         const tax = Math.round(fare*0.10*100)/100;
         const total = Math.round((fare+tax)*100)/100;
-        return `<div class="avail-card ${selected[i]===j?'selected':''}">
+        const isSel = selected[i]===j;
+        const seatColor = Number(seats) <= 3 ? 'warn' : (Number(seats) <= 9 ? 'info' : 'good');
+        const ff = f.fare_family||{};
+        return `<div class="avail-card ${isSel?'selected':''}" style="animation:fadeSlideIn .3s ease ${j*0.05}s both">
           <div class="avail-card-top">
             <div class="avail-airline">
               <div class="avail-logo ${portalBranding?.logo_data?'has-logo':''}">${logoHtml}</div>
-              <div><b>${esc(f.flight_no)}</b><small>${esc(f.fare_family?.name||'Economy Saver')} · ${esc(f.fare_family?.code||'Y')}</small></div>
+              <div>
+                <b>${esc(f.flight_no)}</b>
+                <small>${esc(ff.name||'Economy Saver')} · ${esc(ff.code||'Y')} class</small>
+              </div>
             </div>
             <div class="avail-badges">
-              ${tag(f.fare_family?.fare_basis||'', 'info')}
-              ${tag(f.fare_family?.code||'', 'muted')}
-              ${tag(f.is_best_fare ? 'Best fare' : '', 'good')}
+              ${tag(ff.fare_basis||'', 'info')}
+              ${tag(f.is_best_fare ? '★ Best fare' : '', 'good')}
               ${tag(f.refundable ? 'Refundable' : 'Non-refundable', f.refundable ? 'good' : 'warn')}
-              ${tag(f.ndc?.enabled ? 'NDC offer' : '', 'info')}
-              ${tag(f.fare_family?.priority_boarding ? 'Priority' : '', 'info')}
-              ${tag(Number(seats) <= 9 ? `Only ${seats} left` : '', 'warn')}
+              ${tag(f.ndc?.enabled ? 'NDC' : '', 'info')}
+              ${tag(ff.priority_boarding ? 'Priority' : '', 'info')}
+              ${Number(seats) <= 9 ? `<span class="avail-badge ${seatColor}">${Number(seats) <= 3 ? '🔥' : ''} ${seats} left</span>` : ''}
             </div>
           </div>
           <div class="avail-card-main">
@@ -312,26 +326,28 @@ function renderResults(){
               <div class="avail-point right"><b>${esc(f.arr_time||'')}</b><span>${esc(f.destination)}</span><small>${esc(airportLabel(f,f.destination))}</small></div>
             </div>
             <div class="avail-meta">
-              <div><small>Equipment</small><b>${esc(f.equipment?.aircraft||f.aircraft||'-')}</b></div>
-              <div><small>Cabin layout</small><b>${esc(f.equipment?.layout||'-')}</b></div>
-              <div><small>Baggage</small><b>${esc(f.fare_family?.checked_baggage||'-')}</b></div>
-              <div><small>Terminal / gate</small><b>${esc([f.terminal,f.gate].filter(Boolean).join(' / ')||'-')}</b></div>
+              <div><small>Aircraft</small><b>${esc(f.equipment?.aircraft||f.aircraft||'-')}</b></div>
+              <div><small>Layout</small><b>${esc(f.equipment?.layout||'-')}</b></div>
+              <div><small>Baggage</small><b>${esc(ff.checked_baggage||'-')}</b></div>
+              <div><small>Terminal / Gate</small><b>${esc([f.terminal,f.gate].filter(Boolean).join(' / ')||'-')}</b></div>
             </div>
             <div class="avail-price">
               <div class="price-row"><small>Base fare</small><b>${money(fare, f.currency)}</b></div>
               <div class="price-row"><small>Taxes &amp; fees (10%)</small><b>${money(tax, f.currency)}</b></div>
               <div class="price-row total"><small>Total per adult</small><b>${money(total, f.currency)}</b></div>
-              <small>· ${esc(f.flight_date||'')}</small>
-              <button class="portal-btn ${selected[i]===j?'dark':''}" onclick="selectFlight(${i},${j})">${selected[i]===j?'Selected':'Select'}</button>
-              <button class="portal-btn secondary" onclick="showFlightDetails(${i},${j})">Flight details</button>
+              <small style="text-align:center">${esc(f.flight_date||'')}</small>
+              <button class="portal-btn ${isSel?'dark':''}" onclick="selectFlight(${i},${j})">${isSel?'✓ Selected':'Select flight'}</button>
+              <button class="portal-btn ghost" onclick="showFlightDetails(${i},${j})">Details</button>
             </div>
           </div>
           <div class="avail-card-foot">
-            ${tag(f.status||'scheduled')}${tag(`${seats ?? 0} seats left`)}${tag(f.fare_family?.change_policy||'')}${tag('Terms apply')}
+            ${tag(f.status||'scheduled','good')}${tag(`${seats ?? 0} seats left`, seatColor)}${tag(ff.change_policy||'')}${tag('Terms apply')}
           </div>
         </div>`;
-      }).join('') : '<div class="muted">No flights for this segment.</div>')).join('');
+      }).join('') : '<div class="muted" style="padding:20px;text-align:center">No flights found for this segment.</div>')).join('');
   res.classList.remove('hidden');
+  // scroll to results
+  res.scrollIntoView({behavior:'smooth', block:'start'});
 }
 
 function selectFlight(seg, idx){
