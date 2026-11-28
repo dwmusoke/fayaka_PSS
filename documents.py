@@ -609,8 +609,13 @@ def _boarding_card(c, y, branding, ci, bk, payload, bags=None, bcbp=None):
     qr_size = 74
     qr_x = x + w - qr_size - 14
     _qr(c, code, qr_x, bottom + 8, qr_size)
-    # Linear barcode (Code 128) under the QR for scanners that read 1D barcodes
-    _barcode128(c, code, x + 18, bottom + 96, w - qr_size - 46, 22)
+    # Linear barcode (Code 128) drawn vertically on the right side to avoid
+    # overlapping the BCBP/security text block on the left.
+    c.saveState()
+    c.translate(x + w - 30, bottom + 8)
+    c.rotate(90)
+    _barcode128(c, code, 0, 0, width=qr_size, height=22)
+    c.restoreState()
     code_w = w - qr_size - 46
     c.setFillColor(muted)
     c.setFont('Helvetica-Bold', 7.5)
